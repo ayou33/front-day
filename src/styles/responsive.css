@@ -1,0 +1,103 @@
+/* ==========================================================================
+   Motion
+   ========================================================================== */
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(6px) scale(.99); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
+@media (max-width: 1050px) {
+  .app { --rail-w: 200px; }
+  .sidebar { padding-inline: 12px; }
+  .main-content, .topbar { padding-inline: 24px; }
+  .projects-layout { grid-template-columns: 184px minmax(0, 1fr); }
+  .run-layout { grid-template-columns: 176px minmax(0, 1fr); gap: 12px; }
+}
+
+@media (max-width: 760px) {
+  .app { --rail-w: 0px; display: block; background-image: none; }
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    height: auto;
+    min-height: 0;
+    padding: 10px 12px;
+    background-image: linear-gradient(180deg, var(--surface), var(--surface-2));
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { padding: 0 2px; }
+  .brand-mark { width: 32px; height: 32px; border-radius: 9px; }
+  .brand-mark svg { width: 18px; }
+  .brand strong { font-size: 16px; }
+  .brand small, .sidebar-footer, .nav-label, .nav-chevron, .topbar { display: none; }
+  .sidebar nav { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 8px; padding-inline: 2px; overflow-x: auto; scrollbar-width: none; }
+  .sidebar nav::-webkit-scrollbar { display: none; }
+  .sidebar nav a { flex: 0 0 auto; min-height: 34px; padding: 6px 9px; gap: 6px; font-size: 12px; border-radius: 9px; }
+  .sidebar nav a.active { box-shadow: inset 0 0 0 1px var(--brand-tint-2); background-image: none; }
+  .main-content { padding: 20px 14px 36px; }
+  .projects-layout, .run-layout { grid-template-columns: minmax(0, 1fr); }
+  .run-main { height: auto; min-height: 0; }
+  .run-detail .run-layout { grid-template-rows: auto; }
+  .run-detail .run-stages { display: flex; align-items: stretch; max-width: 100%; padding-bottom: 2px; overflow-x: auto; }
+  .run-stages .panel-header { display: none; }
+  .run-stages .run-stage { width: auto; min-width: 128px; border-radius: 8px; }
+  .event-panel { flex: none; height: max(360px, 60dvh); }
+  .section-heading, .run-heading { align-items: flex-start; margin-bottom: 16px; }
+  .section-heading h1, .run-heading h1 { font-size: 24px; }
+  .section-heading p { font-size: 12.5px; }
+  .panel-header, .list-row, .missing-engines > summary { padding-inline: 14px; }
+  .list-row { padding-block: 11px; }
+  .health-details { padding-inline: 14px; }
+  .elements-panel { scroll-margin-top: 112px; }
+  .search input:not([type=checkbox]) { width: 108px; }
+  .project-facts { padding-inline: 14px; }
+  .project-summary { padding: 16px 14px; }
+  .run-interactions {
+    position: fixed;
+    inset-inline: 12px;
+    bottom: 12px;
+    z-index: 4;
+    margin: 0;
+    padding: 8px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+  }
+  .run-detail.has-interactions { padding-bottom: min(270px, 42dvh); }
+  .interaction-body { max-height: none; }
+}
+
+@media (max-width: 560px) {
+  .section-heading { flex-wrap: wrap; }
+  .section-heading .heading-actions { width: 100%; }
+  .section-heading .heading-actions .button { flex: 1; }
+}
+
+@media (max-width: 460px) {
+  .form-columns, .project-facts { grid-template-columns: minmax(0, 1fr); }
+  .run-heading { flex-wrap: wrap; }
+  .gate { flex-wrap: wrap; }
+  .gate .button { margin-left: 0; }
+  .engine-row { display: grid; grid-template-columns: auto minmax(0, 1fr); }
+  .engine-actions { grid-column: 2; justify-content: flex-start; }
+  .history-actions { flex-wrap: wrap; }
+  .dialog-body { padding: 16px 14px; }
+  .dialog-header, .dialog-footer { padding-inline: 14px; }
+}

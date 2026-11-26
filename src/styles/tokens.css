@@ -1,0 +1,183 @@
+/* ==========================================================================
+   Front Day · design system
+   Tokenised light/dark theme, single stylesheet, no runtime CSS-in-JS.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+
+  /* Canvas & surfaces */
+  --canvas: #f2f4ee;
+  --canvas-tint: rgba(47, 162, 118, .05);
+  --surface: #ffffff;
+  --surface-2: #f7f9f3;
+  --surface-3: #eef2e8;
+  --surface-hover: #f4f8f0;
+  --surface-inset: #fafbf7;
+  --topbar-bg: rgba(255, 255, 255, .82);
+  --inset-highlight: rgba(255, 255, 255, .7);
+
+  /* Ink */
+  --ink: #10201a;
+  --ink-2: #22352b;
+  --ink-3: #40544a;
+  --muted: #68796f;
+  --muted-2: #84958b;
+
+  /* Lines */
+  --line: #e3e8dd;
+  --line-strong: #d1dacd;
+  --line-soft: #edf1e8;
+
+  /* Brand */
+  --brand-500: #2fa276;
+  --brand-600: #27966b;
+  --brand-700: #1e7d56;
+  --brand-800: #176647;
+  --brand-ink: #0d7a52;
+  --brand-tint: #e1f8ea;
+  --brand-tint-2: #c5f0d6;
+  --brand-glow: rgba(47, 162, 118, .16);
+  --ring: rgba(47, 162, 118, .30);
+
+  /* Solid brand fills stay deep enough for white text in either theme. */
+  --brand-fill-500: #2ea77a;
+  --brand-fill-600: #1f8a61;
+  --brand-fill-700: #186f4e;
+
+  /* Primary action surface: solid brand fill with white text in both themes. */
+  --on-brand: #ffffff;
+  --primary-1: var(--brand-fill-500);
+  --primary-2: var(--brand-fill-600);
+  --primary-hover-1: var(--brand-fill-600);
+  --primary-hover-2: var(--brand-fill-700);
+  --primary-shadow: inset 0 1px 0 rgba(255, 255, 255, .18), 0 1px 2px rgba(16, 32, 24, .18),
+    0 10px 20px -14px rgba(16, 32, 24, .5);
+
+  /* Semantic tone */
+  --ok: #24694b;
+  --ok-soft: #e2f1e7;
+  --ok-line: #badbc6;
+  --warn: #8a6415;
+  --warn-soft: #fbf1d7;
+  --warn-line: #ecd9a4;
+  --danger: #a33a30;
+  --danger-soft: #f9eae5;
+  --danger-line: #eeccc3;
+  --alert: #9a4a10;
+  --alert-soft: #fbe9dc;
+  --alert-line: #eec9ac;
+  --info: #2a6279;
+  --info-soft: #e2eff5;
+  --info-line: #c3dce8;
+  --violet: #5b4186;
+  --violet-soft: #efe9f9;
+  --violet-line: #dcCFee;
+
+  /* Console */
+  --console-bg: #0d1a14;
+  --console-ink: #d5e8da;
+
+  /* Native select chevron (data URI, colour baked per theme) */
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%2368796f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  /* Shape */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+
+  /* Elevation */
+  --shadow-xs: 0 1px 1px rgba(16, 32, 24, .04);
+  --shadow-sm: 0 1px 2px rgba(16, 32, 24, .05), 0 2px 6px -3px rgba(16, 32, 24, .12);
+  --shadow-md: 0 1px 2px rgba(16, 32, 24, .05), 0 14px 30px -20px rgba(16, 32, 24, .35);
+  --shadow-lg: 0 2px 6px rgba(16, 32, 24, .06), 0 30px 70px -30px rgba(16, 32, 24, .45);
+
+  /* Motion */
+  --ease: cubic-bezier(.2, .7, .25, 1);
+  --dur: .16s;
+
+  /* Layout */
+  --topbar-h: 60px;
+  --rail-w: 232px;
+  --scroll-thumb: rgba(32, 56, 44, .22);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+    --canvas: #0e0f10;
+    --canvas-tint: rgba(77, 169, 133, .035);
+    --surface: #16181a;
+    --surface-2: #1b1e20;
+    --surface-3: #222628;
+    --surface-hover: #1e2224;
+    --surface-inset: #121416;
+    --topbar-bg: rgba(22, 24, 26, .86);
+    --inset-highlight: rgba(255, 255, 255, .06);
+
+    --ink: #eceeef;
+    --ink-2: #c7ccce;
+    --ink-3: #a4abae;
+    --muted: #8a9194;
+    --muted-2: #737a7d;
+
+    --line: rgba(236, 238, 240, .10);
+    --line-strong: rgba(236, 238, 240, .17);
+    --line-soft: rgba(236, 238, 240, .06);
+
+    --brand-500: #4da985;
+    --brand-600: #3d9375;
+    --brand-700: #2f7b60;
+    --brand-800: #27654f;
+    --brand-ink: #9adfc0;
+    --brand-tint: rgba(77, 169, 133, .14);
+    --brand-tint-2: rgba(77, 169, 133, .24);
+    --brand-glow: rgba(77, 169, 133, .12);
+    --ring: rgba(77, 169, 133, .34);
+
+    --on-brand: #ffffff;
+    --brand-fill-500: #2f7b60;
+    --brand-fill-600: #25604b;
+    --brand-fill-700: #1c4d3b;
+    --primary-1: var(--brand-fill-500);
+    --primary-2: var(--brand-fill-600);
+    --primary-hover-1: var(--brand-fill-600);
+    --primary-hover-2: var(--brand-fill-700);
+    --primary-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), 0 2px 8px -3px rgba(0, 0, 0, .6);
+
+    --ok: #75c79d;
+    --ok-soft: rgba(117, 199, 157, .14);
+    --ok-line: rgba(117, 199, 157, .26);
+    --warn: #e2bd6a;
+    --warn-soft: rgba(226, 189, 106, .13);
+    --warn-line: rgba(226, 189, 106, .24);
+    --danger: #e79086;
+    --danger-soft: rgba(231, 144, 134, .13);
+    --danger-line: rgba(231, 144, 134, .24);
+    --alert: #e8a173;
+    --alert-soft: rgba(232, 161, 115, .13);
+    --alert-line: rgba(232, 161, 115, .24);
+    --info: #8fc4d9;
+    --info-soft: rgba(143, 196, 217, .13);
+    --info-line: rgba(143, 196, 217, .22);
+    --violet: #c3a7ea;
+    --violet-soft: rgba(195, 167, 234, .13);
+    --violet-line: rgba(195, 167, 234, .24);
+
+    --console-bg: #0b0d0e;
+    --console-ink: #dfe3e4;
+
+    --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%238a9194' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+    --shadow-xs: 0 1px 1px rgba(0, 0, 0, .3);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35), 0 2px 8px -3px rgba(0, 0, 0, .5);
+    --shadow-md: 0 1px 2px rgba(0, 0, 0, .35), 0 16px 34px -22px rgba(0, 0, 0, .8);
+    --shadow-lg: 0 2px 8px rgba(0, 0, 0, .4), 0 34px 80px -34px rgba(0, 0, 0, .9);
+
+    --scroll-thumb: rgba(236, 238, 240, .16);
+}

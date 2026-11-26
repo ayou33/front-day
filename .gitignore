@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.front-day/
+.front-day.preferences.json*
+workbench.sqlite*
+*.tsbuildinfo
+.env*
