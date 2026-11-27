@@ -2,7 +2,7 @@ import { Fragment, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent } from 'react'
 import { AlertTriangle, Check, CircleDashed, LoaderCircle, Plus } from 'lucide-react'
 import type { PlanDayMark, PlanItem } from '../shared/contracts.ts'
-import { pastPlanDateError, planStatusLabels } from '../shared/plans.ts'
+import { pastPlanDateError, isPlanOverdue, planStatusLabels } from '../shared/plans.ts'
 import type { PlanDates } from '../shared/plans.ts'
 import { calendarWeeks, layoutWeek, planLaneHeight, shiftPlan, weekdays, byPlanOrder } from './plan-calendar.ts'
 import { PlanMarkChip } from './PlanDateMarks.tsx'
@@ -34,11 +34,12 @@ function dateAt(calendar: HTMLElement, event: PointerEvent) {
   return week.querySelectorAll<HTMLElement>('.plan-day')[column]?.dataset.date
 }
 
-export function PlanCalendar({ month, today, items, movingId, marksByDate, onAdd, onEdit, onMove, onReorder, onMarkDate }: {
+export function PlanCalendar({ month, today, items, movingId, marksByDate, onAdd, onEdit, onMove, onReorder, onMarkDate, onContextMenu }: {
   month: string; today: string; items: PlanItem[]; movingId: string
   marksByDate: ReadonlyMap<string, PlanDayMark[]>; onMarkDate: (date: string) => void
   onAdd: (startDate: string, endDate?: string) => void; onEdit: (item: PlanItem) => void; onMove: (item: PlanItem, dates: PlanDates) => void
   onReorder: (item: PlanItem, targetIndex: number) => void
+  onContextMenu: (item: PlanItem, point: { x: number; y: number }) => void
 }) {
   const calendar = useRef<HTMLDivElement>(null)
   const drag = useRef<Drag | null>(null)
@@ -175,18 +176,35 @@ export function PlanCalendar({ month, today, items, movingId, marksByDate, onAdd
       })}
       {segments.map(({ item, start, end, lane, startsBefore, endsAfter }) => {
         const range = item.startDate === item.endDate ? item.startDate : `${item.startDate} 至 ${item.endDate}`
-        const overdue = item.endDate < today && item.status !== 'done'
+        const overdue = isPlanOverdue(item, today)
         const status = overdue ? '已逾期' : planStatusLabels[item.status]
         const StatusIcon = overdue ? AlertTriangle : statusIcons[item.status]
         const tooltipKey = `${item.id}-${days.find(Boolean)}`
         const inactive = preview?.id === item.id || movingId === item.id || orderPreview?.id === item.id
         return <button key={item.id} type="button" className={`plan-event plan-status--${item.status}${overdue ? ' plan-overdue' : ''}${inactive ? ' moving' : ''}${orderPreview?.id === item.id ? ' reordering' : ''}${startsBefore ? ' continues-from' : ''}${endsAfter ? ' continues-to' : ''}`}
           style={{ gridColumn: `${start + 1} / ${end + 2}`, gridRow: lane + 2, ...(orderPreview?.id === item.id && { transform: `translateY(${orderPreview.dy}px)` }) }}
-          aria-label={`编辑计划项 ${item.name}，${range}，${status}`} aria-describedby={tooltip?.key === tooltipKey ? tooltipId : undefined}
+          aria-label={`编辑计划项 ${item.name}，${range}，${status}`} aria-describedby={tooltip?.key === tooltipKey ? tooltipId : undefined} aria-keyshortcuts="Shift+F10"
           onPointerEnter={event => { if (event.pointerType !== 'touch') showTooltip(event.currentTarget, item.notes, tooltipKey) }}
           onPointerLeave={event => hideTooltip(event.currentTarget)}
           onFocus={event => { if (event.currentTarget.matches(':focus-visible')) showTooltip(event.currentTarget, item.notes, tooltipKey) }}
-          onBlur={event => hideTooltip(event.currentTarget)} onPointerDown={event => {
+          onBlur={event => hideTooltip(event.currentTarget)}
+          onContextMenu={event => {
+            event.preventDefault()
+            event.stopPropagation()
+            if (movingId) return
+            setTooltip(null)
+            onContextMenu(item, { x: event.clientX, y: event.clientY })
+          }}
+          onKeyDown={event => {
+            if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+            event.preventDefault()
+            event.stopPropagation()
+            if (movingId) return
+            setTooltip(null)
+            const bounds = event.currentTarget.getBoundingClientRect()
+            onContextMenu(item, { x: bounds.right - 8, y: bounds.bottom })
+          }}
+          onPointerDown={event => {
             const edge = (event.target as HTMLElement).closest<HTMLElement>('[data-plan-edge]')?.dataset.planEdge
             const kind = edge === 'start' || edge === 'end' ? edge : 'move'
             begin(event, { kind, item })

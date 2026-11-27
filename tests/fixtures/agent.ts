@@ -23,7 +23,7 @@ function terminalCommand() {
 }
 const acp = provider !== 'codex'
 const cursor = provider === 'cursor'
-let sessionId = `${provider}-session`
+let sessionId = !acp && process.env.FRONT_DAY_FIXTURE_UNIQUE_CODEX_SESSIONS ? `codex-session-${process.pid}` : `${provider}-session`
 let turn = 0
 let mode = ''
 let model = 'fixture-model'
@@ -41,14 +41,17 @@ function complete() {
     writeFileSync('modified.ts', 'export const value = 2\n')
     unlinkSync('removed.ts')
   }
-  const handoff = prompt.includes('CONTINUATION_SUMMARY') ? '\n<front-day-handoff>{"changes":"表单保存完成","constraints":"沿用旧接口","files":"src/form.ts","verification":"表单用例通过"}</front-day-handoff>' : ''
+  const longOutput = prompt.includes('LONG_OUTPUT')
+  const handoff = longOutput || prompt.includes('CONTINUATION_SUMMARY')
+    ? '\n<front-day-handoff>{"changes":"表单保存完成","constraints":"沿用旧接口","files":"src/form.ts","verification":"表单用例通过"}</front-day-handoff>本地预览服务已结束。'
+    : ''
   if (acp) {
     if (!cancelled) {
       update({ sessionUpdate: 'tool_call_update', toolCallId: `tool-${turn}`, status: 'completed' })
       const activeModel = cursor && model === 'default[]' ? ' · Auto' : ''
       const text = `${engineGuides[provider].name} 结果 · ${prompt.includes('补充指令') ? '已补充' : '已处理'}${!cursor && mode ? ` · ${mode}` : ''}${activeModel}`
       const paragraphs = Array.from({ length: 55 }, (_, i) => `第 ${i + 1} 段执行说明。`)
-      const output = prompt.includes('LONG_OUTPUT') ? [text, ...paragraphs, '阅读结束标记'].join('\n\n') : text
+      const output = longOutput ? [text, '| 检查项 | 结果 |\n| --- | --- |\n| 表单校验 | 通过 |', '- [x] 已检查表单校验', ...paragraphs, '阅读结束标记'].join('\n\n') : text
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: output + handoff } })
     }
     result(request, { stopReason: cancelled ? 'cancelled' : 'end_turn' })
@@ -137,9 +140,17 @@ if (!terminalCommand()) createInterface({ input: process.stdin }).on('line', lin
     sessionId = params.threadId
     result(id, { thread: { id: sessionId }, model: 'fixture-model' })
   }
+  if (method === 'thread/fork') {
+    if (params.excludeTurns !== true || !params.threadId || !params.lastTurnId) {
+      send({ id, error: { code: -32602, message: 'Expected a source thread and an exact fork turn' } })
+      return
+    }
+    sessionId = `fork-${params.lastTurnId}`
+    result(id, { thread: { id: sessionId, forkedFromId: params.threadId }, model: 'fixture-model' })
+  }
   if (method === 'session/prompt' || method === 'turn/start') {
     const prompt = String((params.prompt ?? params.input)[0].text)
-    current = { request: id, prompt, id: `turn-${++turn}` }
+    current = { request: id, prompt, id: `turn-${process.pid}-${++turn}` }
     if (!acp && prompt.includes('HOLD_FOR_CANCEL')) {
       const turnId = current.id
       setTimeout(() => result(id, { turn: { id: turnId, status: 'inProgress' } }), 400)

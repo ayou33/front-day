@@ -19,10 +19,10 @@ export function originalContext(run: Run, stage: StageSnapshot) {
 }
 
 /** Builds the fresh prompt plus the optional resume/continuation prompt for one agent turn. */
-export function buildPrompts({ run, stage, parent, source, previous, sources, entries, missing, testLogs, origin, compareContext, original, preview }: {
+export function buildPrompts({ run, stage, parent, source, previous, sources, entries, missing, testLogs, origin, compareContext, original, preview, desktop }: {
   run: Run; stage: StageSnapshot; parent?: Run; source?: { stage: StageSnapshot; attempt: Attempt }
   previous?: Attempt; sources: ContextSource[]; entries: ContextEntry[]; missing: string[]; testLogs?: string
-  origin: string; compareContext: boolean | undefined; original: ContextStamp[]; preview?: boolean
+  origin: string; compareContext: boolean | undefined; original: ContextStamp[]; preview?: boolean; desktop?: boolean
 }) {
   const goal = (run.goal ?? run.title).trim()
   const goalLead = excerpt(goal.split(/\r?\n/, 1)[0], 200)
@@ -45,7 +45,7 @@ export function buildPrompts({ run, stage, parent, source, previous, sources, en
     stage.kind === 'agent' && `### 交接记录\n${handoffInstruction}`,
   ].filter(Boolean).join('\n\n')
   const contextUrl = `${origin}/api/runs/${encodeURIComponent(run.id)}/context`
-  const apiExecutor = !!stage.engine && isApiExecutor(stage.engine)
+  const apiExecutor = !desktop && !!stage.engine && isApiExecutor(stage.engine)
   const contextIndex = `${contextUrl}?stage=${run.stageIndex}`
   const entryLink = (id: string) => apiExecutor ? `使用 read_context 读取 ${id}` : `${contextUrl}/${encodeURIComponent(id)}?stage=${run.stageIndex}`
   const sourceById = new Map(sources.map(source => [source.id, source]))
@@ -94,17 +94,18 @@ export function buildPrompts({ run, stage, parent, source, previous, sources, en
     : `资料索引 ${contextIndex}\n按本次目标读取需要的资料。涉及本次工作的约束若有省略，请在修改前查阅全文。索引返回条目 ID，按 /context/<条目 ID>?stage=${run.stageIndex} 读取详情。文件资料返回路径。`
   const contextGuide = (run.goal || run.iteration) && '结合与目标有关的各层信息，按其适用范围执行。要求或边界有冲突时，先确认适用条件。背景缺失或资料无法读取时，从工作目录的说明、配置、实现和测试中补齐能查证的信息。区分事实和假设，只有关键决定无法查证且会阻塞任务时才询问。根据任务规模决定计划和输出，保持改动在任务目标和工作目录的范围内。'
   const freshPrompt = (from?: Run, shareHandoff = true) => {
-    const compact = Boolean(from)
+    const compact = Boolean(from) && !desktop
     const hasLongBackground = entries.some(entry => !sourceById.has(entry.id) && entry.value.trim().length > backgroundTextLimit)
     const previousResult = compact ? excerpt(previous?.output, 900)
       : previous && JSON.stringify({ output: previous.output, test: previous.test })
     const priorStage = previousResult && `### 上一阶段结果（供参考）\n${previousResult}`
     const results = testLogs !== undefined && `### 真实测试结果与日志片段\n${testLogs}`
-    if (stage.promptOverride) return [stage.promptOverride, priorStage, results].filter(Boolean).join('\n\n')
+    if (stage.promptOverride && !desktop) return [stage.promptOverride, priorStage, results].filter(Boolean).join('\n\n')
     return [
       goalHeading, resourceGuide, renderScope('project', compact), renderScope('iteration', compact),
       (compact || sources.length || hasLongBackground) && indexGuide,
       from && shareHandoff && `## 原任务交接摘要（供参考，以当前要求为准）\n${handoffText(from)}`,
+      desktop && stage.promptOverride && `## 自定义 Agent 提示词\n${stage.promptOverride}`,
       taskEvidence,
       priorStage,
       missing.length && `### 暂不可用的资料\n${compact ? excerpt(missing.join('\n'), 700) : missing.join('\n')}`,
@@ -117,7 +118,10 @@ export function buildPrompts({ run, stage, parent, source, previous, sources, en
     changed.length && `新增或更新的上下文（按条目来源替换旧信息）\n${changed.map(entryLine).join('\n\n')}`,
     removed.length && `已移除或当前不可用的旧上下文\n${removed.map(entry => entry.label).join('、')}`,
   ].filter(Boolean).join('\n\n')
-  const useResume = compareContext && (run.continuation?.mode === 'resume' || delta.length <= resumeDeltaLimit)
+  const useResume = compareContext && (run.continuation?.mode === 'resume' || run.continuation?.mode === 'fork' || delta.length <= resumeDeltaLimit)
+  if (!preview && run.continuation?.mode === 'fork' && run.stageIndex === 0 && !useResume) {
+    throw new Error('无法从所选轮次创建分支，请核对项目目录和 Codex 引擎配置。')
+  }
   if (!preview && run.continuation?.mode === 'resume' && run.stageIndex === 0 && !useResume) {
     throw new Error('原会话已有后续任务或无法恢复。请用交接摘要开启新会话。')
   }

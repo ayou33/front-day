@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isApiExecutor } from '../shared/contracts.ts'
-import type { Attempt, Run, StageSnapshot } from '../shared/contracts.ts'
+import type { Attempt, Executor, Run, StageSnapshot } from '../shared/contracts.ts'
+import { sessionFrom, splitHandoff } from '../shared/continuations.ts'
 import type { ContextStamp, Handoff } from '../shared/continuations.ts'
 import { legacyIterationElements, projectFields } from '../shared/context.ts'
 
@@ -16,42 +17,35 @@ export function excerpt(value: string | undefined, limit: number) {
 }
 
 export function saveHandoff(attempt: Attempt, text: string) {
-  const match = /\s*<front-day-handoff>\s*([\s\S]*?)\s*<\/front-day-handoff>\s*$/.exec(text)
-  if (!match) return text
-  try {
-    const { changes, constraints, files, verification } = JSON.parse(match[1])
-    if ([changes, constraints, files, verification].every(item => typeof item === 'string')) {
-      attempt.handoff = { changes: excerpt(changes, 650), constraints: excerpt(constraints, 420), files: excerpt(files, 380), verification: excerpt(verification, 380) }
-      return text.slice(0, match.index).trimEnd() || attempt.handoff.changes
-    }
-  } catch { /* retain plain output when it does not contain a structured handoff */ }
-  return text
+  const result = splitHandoff(text)
+  if (!result.handoff) return text
+  attempt.handoff = compactHandoff(result.handoff)
+  return result.text || attempt.handoff.changes
 }
 
-export function sessionFrom(run: Run) {
-  for (let index = run.stages.length - 1; index >= 0; index--) {
-    const stage = run.stages[index]
-    const attempt = run.attempts[index]?.findLast(item => item.status === 'succeeded' && item.sessionId)
-    if (stage.kind === 'agent' && stage.engine && attempt) return { index, stage, engine: stage.engine, attempt }
-  }
+function compactHandoff({ changes, constraints, files, verification }: Handoff): Handoff {
+  return { changes: excerpt(changes, 650), constraints: excerpt(constraints, 420), files: excerpt(files, 380), verification: excerpt(verification, 380) }
 }
 
 export function compatibleSession(parent: Run, directory: string, stage?: StageSnapshot) {
   const source = sessionFrom(parent)
   const engine = stage?.engine
   if (parent.project.directory !== directory || !source || !engine || stage.kind !== 'agent') return undefined
-  const previous = source.engine
-  if (isApiExecutor(engine) || isApiExecutor(previous) || engine.id !== previous.id || engine.provider !== previous.provider || engine.executable !== previous.executable
-    || engine.model !== previous.model || engine.mode !== previous.mode) return undefined
-  return source
+  return sameSessionEngine(source.engine, engine) ? source : undefined
+}
+
+export function sameSessionEngine(previous: Executor, engine: Executor) {
+  return !isApiExecutor(engine) && !isApiExecutor(previous) && engine.id === previous.id && engine.provider === previous.provider
+    && engine.executable === previous.executable && engine.model === previous.model && engine.mode === previous.mode
 }
 
 export function handoffText(parent: Run) {
   const previous = sessionFrom(parent)?.attempt ?? parent.attempts.flat().findLast(item => item.status === 'succeeded' && item.output)
-  const summary: Handoff = previous?.handoff ?? {
-    changes: excerpt(previous?.output, 650) || excerpt(parent.goal ?? parent.title, 250),
+  const output = splitHandoff(previous?.output ?? '')
+  const summary: Handoff = previous?.handoff ?? (output.handoff && compactHandoff(output.handoff)) ?? {
+    changes: excerpt(output.text, 650) || excerpt(parent.goal ?? parent.title, 250),
     constraints: excerpt(parent.project.context?.constraints, 420),
-    files: excerpt(previous?.output?.match(/`[^`\n]*[\/\\][^`\n]*`/g)?.slice(0, 6).join('、'), 380),
+    files: excerpt(output.text.match(/`[^`\n]*[\/\\][^`\n]*`/g)?.slice(0, 6).join('、'), 380),
     verification: '',
   }
   const tests = parent.stages.flatMap((stage, index) => {

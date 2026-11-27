@@ -4,6 +4,7 @@ import { Plus, X } from 'lucide-react'
 import type { PlanDayMark, PlanDayMarks } from '../shared/contracts.ts'
 import { planMarkLabelMax } from '../shared/plans.ts'
 import { request } from './api.ts'
+import { contrastRatio, markInk } from './mark-contrast.ts'
 import { Dialog, ErrorLine, Field, message } from './ui.tsx'
 
 const presets = [
@@ -12,18 +13,10 @@ const presets = [
   { title: '自定义标记', mark: { label: '', style: 'border', color: '#397aa6' } },
 ] satisfies { title: string; mark: PlanDayMark }[]
 
-function fillTextColor(color: string) {
-  const luminance = [1, 3, 5].map(index => {
-    const channel = Number.parseInt(color.slice(index, index + 2), 16) / 255
-    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-  })
-  return 0.2126 * luminance[0] + 0.7152 * luminance[1] + 0.0722 * luminance[2] > 0.179 ? '#000' : '#fff'
-}
-
 export function PlanMarkChip({ mark, onPointerEnter, onPointerLeave }: {
   mark: PlanDayMark; onPointerEnter?: PointerEventHandler<HTMLSpanElement>; onPointerLeave?: PointerEventHandler<HTMLSpanElement>
 }) {
-  const style = { '--mark-color': mark.color, '--mark-ink': mark.style === 'fill' ? fillTextColor(mark.color) : undefined } as CSSProperties
+  const style = { '--mark-color': mark.color, '--mark-ink': mark.style === 'fill' ? markInk(mark.color) : undefined } as CSSProperties
   return <span className={`plan-mark-chip ${mark.style}`} title={onPointerEnter ? undefined : mark.label} style={style}
     onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>{mark.label}</span>
 }
@@ -75,6 +68,9 @@ export function PlanDateMarksEditor({ date, marks, close, onSave }: {
             </select></Field>
             <Field label="颜色"><input type="color" value={mark.color} onChange={event => update(key, { color: event.target.value })} /></Field>
           </div>
+          {mark.style === 'fill' && <p className="caption plan-mark-contrast">
+            填充样式的文字会自动使用{markInk(mark.color) === '#000000' ? '黑色' : '白色'}，对比度约 {contrastRatio(mark.color, markInk(mark.color)).toFixed(1)}:1。
+          </p>}
           <Field label="备注"><textarea rows={2} value={mark.notes ?? ''} onChange={event => update(key, { notes: event.target.value })} /></Field>
         </fieldset>)}
         <ErrorLine text={error} />

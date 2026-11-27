@@ -82,6 +82,7 @@
   }
   .run-detail.has-interactions { padding-bottom: min(270px, 42dvh); }
   .interaction-body { max-height: none; }
+  .conversation-turn { scroll-margin-top: 124px; }
 }
 
 @media (max-width: 560px) {

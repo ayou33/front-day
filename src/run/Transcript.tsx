@@ -1,5 +1,8 @@
 import { Activity, Braces, FlaskConical, Send, Terminal } from 'lucide-react'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { splitHandoff } from '../../shared/continuations.ts'
+import type { Handoff } from '../../shared/continuations.ts'
 import { details, readable, textOf } from './run-text.ts'
 import type { Frame } from './run-text.ts'
 
@@ -29,13 +32,35 @@ function AgentItem({ frame }: { frame: Frame }) {
 }
 
 export function MessageText({ text }: { text: string }) {
-  return <div className="markdown"><Markdown skipHtml components={{ img: ({ alt }) => <span>{alt}</span>, a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>{text}</Markdown></div>
+  return <div className="markdown"><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{
+    img: ({ alt }) => <span>{alt}</span>,
+    a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+    table: ({ node: _node, ...props }) => <div className="markdown-table"><table {...props} /></div>,
+  }}>{text}</Markdown></div>
+}
+
+export function HandoffSummary({ handoff }: { handoff: Handoff }) {
+  return <details className="event-item"><summary>交接摘要</summary>
+    <dl className="project-facts handoff-facts">
+      {[['已完成', handoff.changes], ['关键约束', handoff.constraints], ['相关文件', handoff.files], ['验证结果', handoff.verification]].map(([label, value]) =>
+        <div key={label}><dt>{label}</dt><dd>{value || '未记录'}</dd></div>)}
+    </dl>
+  </details>
+}
+
+export function AgentResult({ text, handoff }: { text: string; handoff?: Handoff }) {
+  const output = splitHandoff(readable(text))
+  const summary = handoff ?? output.handoff
+  return <div className="agent-result">
+    {output.text && <MessageText text={output.text} />}
+    {summary && <HandoffSummary handoff={summary} />}
+  </div>
 }
 
 export function Transcript({ frames }: { frames: Frame[] }) {
   return <div className="transcript">{frames.map(frame => {
     if (frame.kind === 'agent_text') return frame.text && <div className="message-card" key={frame.id}><div className="message-label"><Braces size={15} />Agent</div>
-      <MessageText text={frame.text} /></div>
+      <AgentResult text={frame.text} /></div>
     if (frame.kind === 'agent_item') return <AgentItem key={frame.id} frame={frame} />
     if (frame.kind === 'test_output') return <div className="output-card" key={frame.id}><span>{frame.title}</span><pre className="console">{readable(frame.text ?? '')}</pre></div>
     if (frame.kind === 'test_result') return <div className="system-event" key={frame.id}><FlaskConical size={15} /><strong>测试结果</strong><span>{frame.data.code === 0 ? '通过' : '未通过'} · 退出码 {String(frame.data.code ?? '—')}</span></div>

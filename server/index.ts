@@ -22,6 +22,7 @@ import type { TextGenerator } from './prompt-optimizer.ts'
 import { accountOrigin, localPath, projectDirectory, webUrl, withinDirectory } from './resources.ts'
 import { object } from './rpc.ts'
 import { Store } from './storage.ts'
+import { conversation } from './conversations.ts'
 import { Workflow } from './workflow.ts'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -305,7 +306,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
         const query = z.object({ archived: z.enum(['0', '1']).default('0'), limit: z.coerce.number().int().min(1).max(50).default(20),
           projectId: z.string().min(1).max(100).optional(), iterationId: z.string().min(1).max(100).optional(),
           status: z.enum(Object.keys(statusLabels)).optional(), query: z.string().trim().max(200).optional(),
-          cursor: z.string().regex(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\|[a-z0-9-]{1,100}$/i).optional(),
+          cursor: z.string().regex(/^[01]\|\d{4}-\d{2}-\d{2}T[\d:.]+Z\|[a-z0-9-]{1,100}$/i).optional(),
         }).parse(Object.fromEntries(params))
         return send(res, store.runPage({ ...query, archived: query.archived === '1' }))
       }
@@ -313,10 +314,18 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
     if (req.method === 'GET' && !id) return send(res, workflow.store.summaries())
     if (req.method === 'POST' && !id) return send(res, publicRun(await workflow.dispatch(dispatchSchema.parse(await json(req)))), 201)
     if (id && req.method === 'GET' && action === 'events') return events(req, res, id, url)
+    if (id && req.method === 'GET' && action === 'conversation') {
+      workflow.requireUnarchivedRun(id)
+      return send(res, conversation(store, id))
+    }
     if (id && req.method === 'GET' && action === 'related') {
       return send(res, store.relatedRuns(id))
     }
     if (id && req.method === 'GET' && action === 'context-difference') return send(res, workflow.contextDifference(id))
+    if (id && req.method === 'GET' && action === 'desktop-prompt') {
+      const stage = z.coerce.number().int().min(0).parse(url.searchParams.get('stage') ?? 0)
+      return send(res, await workflow.desktopPrompt(id, stage))
+    }
     if (id && req.method === 'PUT' && !action) return send(res, await workflow.update(id, dispatchSchema.parse(await json(req))))
     if (id && !requestId && (action === 'prompt' || action === 'optimize-prompt')) {
       const stage = z.coerce.number().int().min(0).parse(url.searchParams.get('stage') ?? 0)

@@ -1,6 +1,6 @@
 export const planStatuses = ['planned', 'in-progress', 'done'] as const
+export type PlanStatus = (typeof planStatuses)[number]
 export const planStatusLabels = { planned: '未开始', 'in-progress': '进行中', done: '已完成' }
-
 export const planMarkStyles = ['border', 'fill'] as const
 export const planMarkLabelMax = 24
 
@@ -14,5 +14,23 @@ export function localPlanDate(date = new Date()) {
 export function pastPlanDateError(dates: PlanDates, today: string, previous?: PlanDates) {
   if (dates.startDate < today && dates.startDate !== previous?.startDate) return '开始日期不能早于今天'
   if (dates.endDate < today && dates.endDate !== previous?.endDate) return '结束日期不能早于今天'
+  return ''
+}
+
+export function isPlanOverdue(item: { status: PlanStatus; endDate: string }, today: string) {
+  return item.status !== 'done' && item.endDate < today
+}
+
+/** 开始按钮的互斥规则：已开始、已完成或已逾期都不能再次开始。 */
+export function planStartBlockedReason(item: { status: PlanStatus; endDate: string }, today: string) {
+  if (item.status === 'done') return '计划已完成'
+  if (item.status === 'in-progress') return '计划已开始'
+  if (item.endDate < today) return '已逾期，不能开始'
+  return ''
+}
+
+export function planCompleteBlockedReason(item: { status: PlanStatus }) {
+  if (item.status === 'done') return '计划已完成'
+  if (item.status === 'planned') return '计划未开始'
   return ''
 }

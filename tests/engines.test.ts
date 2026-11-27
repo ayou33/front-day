@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import type { Account, Catalog, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
+import type { Account, Catalog, Conversation, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
 import type { Preferences } from '../shared/preferences.ts'
 import { engineGuides, engineProviders } from '../shared/engines.ts'
 import { Store } from '../server/storage.ts'
@@ -49,6 +49,10 @@ test('Cursor 和 Codex 的原生审批、提问、补充轮次与中断', async 
       await app.api(`/runs/${run.id}/stop`, 'POST', {})
       const stopped = await waitForRun(app.api, run.id, 'stopped')
       assert.equal(stopped.attempts[1][0].status, 'stopped')
+      const conversation = await app.api<Conversation>(`/runs/${run.id}/conversation`)
+      const turns = conversation.branches[0].turns.filter(turn => turn.stage === 0)
+      assert.deepEqual(turns.map(turn => turn.input), provider === 'cursor' ? ['交互任务', '补充指令（当前执行中）', '补充指令'] : ['交互任务', '补充指令'])
+      assert.deepEqual(turns[0].supplements ?? [], provider === 'codex' ? ['补充指令（当前执行中）'] : [])
       const response = await fetch(`${app.baseUrl}/api/runs/${run.id}/events?after=0`, { signal: AbortSignal.timeout(15_000) })
       const reader = response.body!.getReader()
       let events = ''
@@ -76,7 +80,12 @@ test('发现本机 CLI，区分认证状态并优先派发到已就绪的引擎'
   const app = await serve(h.dir, { FRONT_DAY_FIXTURE_CURSOR_AUTH: 'signed-out', FRONT_DAY_FIXTURE_CODEX_AUTH: 'unknown', CURSOR_API_KEY: '', CURSOR_AUTH_TOKEN: '' })
   t.after(async () => { await app.stop(); await h.cleanup() })
   const { api } = app
-  assert.deepEqual((await api<Catalog>('/catalog')).engines.map(engine => engine.provider), [...engineProviders])
+  const defaults = await api<Catalog>('/catalog')
+  assert.deepEqual(defaults.engines.map(engine => engine.provider), [...engineProviders])
+  assert.equal(defaults.engineAvailability?.find(entry => entry.id === 'codex-default')?.executable, h.wrappers.codex)
+  const codexDefault = defaults.engines.find(engine => engine.id === 'codex-default')!
+  await api('/config/engines/codex-default', 'PUT', { ...codexDefault, executable: join(h.dir, 'missing-codex') })
+  assert.equal((await api<Catalog>('/catalog')).engineAvailability?.find(entry => entry.id === 'codex-default')?.executable, null)
   for (const provider of engineProviders) {
     await api(`/config/engines/${provider}-default`, 'PUT', { name: engineGuides[provider].name, provider, executable: h.wrappers[provider], model: '', mode: 'agent' })
   }

@@ -44,7 +44,7 @@ export function timeline(events: RunEvent[]) {
       } else frames.push({ id: event.seq, kind: event.kind, title: event.name, data })
     } else if (event.kind === 'test_output' && last?.kind === 'test_output' && last.title === event.name) {
       last.text = (last.text ?? '') + textOf(data.text)
-    } else if (!['native', 'state'].includes(event.kind)) {
+    } else if (!['native', 'state', 'turn'].includes(event.kind)) {
       frames.push({ id: event.seq, kind: event.kind, title: event.name, data, text: textOf(data.text) })
     }
   }

@@ -584,8 +584,6 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5
 .history-filters .search input:not([type=checkbox]) { width: 118px; }
 .history-filters select { max-width: min(180px, 100%); min-height: 34px; padding-right: 28px; font-size: 12px; background-position: right 9px center; background-size: 10px 10px; }
 .history-actions { flex-wrap: nowrap; justify-content: flex-end; }
-.history-expand { margin-top: 6px; }
-.history-followup td:first-child { padding-inline-start: 32px; border-inline-start: 2px solid var(--line); }
 
 /* Keep the whole filter bar on one row on common laptop widths. */
 @media (max-width: 1360px) {
@@ -616,14 +614,16 @@ th.history-group { color: var(--ink-3); text-align: left; }
   border-radius: 999px;
 }
 .status { box-shadow: inset 0 0 0 1px var(--st-line, transparent); }
-.status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status svg { flex: 0 0 auto; }
+.status-spin { animation: spin 1s linear infinite; }
 
 .status--queued { --st-soft: var(--surface-3); --st-ink: var(--muted); --st-line: var(--line); }
-.status--saved { --st-soft: var(--brand-tint); --st-ink: var(--brand-ink); --st-line: var(--brand-tint-2); }
+.status--saved { --st-soft: var(--violet-soft); --st-ink: var(--violet); --st-line: var(--violet-line); }
 .status--running, .status--stopping { --st-soft: var(--info-soft); --st-ink: var(--info); --st-line: var(--info-line); }
 .status--succeeded { --st-soft: var(--ok-soft); --st-ink: var(--ok); --st-line: var(--ok-line); }
 .status--waiting_approval, .status--waiting_input, .status--waiting_stage { --st-soft: var(--warn-soft); --st-ink: var(--warn); --st-line: var(--warn-line); }
 .status--failed, .status--interrupted { --st-soft: var(--danger-soft); --st-ink: var(--danger); --st-line: var(--danger-line); }
+.status--stopped { --st-soft: var(--surface-2); --st-ink: var(--muted-2); --st-line: var(--line-strong); }
 
 .chip { padding: 2px 8px; font-size: 11px; font-weight: 600; background: var(--surface-3); color: var(--ink-3); }
 .chip svg { opacity: .8; }

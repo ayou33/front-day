@@ -49,7 +49,7 @@ export type TestResult = { code: number | null; signal: string | null; ms: numbe
 export type Attempt = {
   number: number; status: AttemptStatus; startedAt: string; endedAt?: string; output?: string
   sessionId?: string; error?: string; test?: TestResult; analysisError?: string
-  handoff?: Handoff; contextStamps?: ContextStamp[]; historyChars?: number; contextMode?: 'resume' | 'handoff'
+  handoff?: Handoff; contextStamps?: ContextStamp[]; historyChars?: number; contextMode?: 'resume' | 'handoff' | 'fork'
   acceptance?: Acceptance; apiMetrics?: ApiMetrics; fileChanges?: AttemptFileChanges
 }
 export type Interaction = {
@@ -98,13 +98,27 @@ export type RunSummary = Pick<Run, 'id' | 'title' | 'taskType' | 'status' | 'sta
   projectId: string; projectName: string; iterationId?: string; iterationName?: string; templateName: string; stageName: string; stageCount: number
   continuation?: Run['continuation']; contextMode?: Attempt['contextMode']
 }
-export type RunGroup = { source: RunSummary; runs: RunSummary[] }
+export type RunGroup = { source: RunSummary; runs: RunSummary[]; forkCount?: number }
 export type RunPage = { records: RunGroup[]; next?: string; scopeHasRuns: boolean;
   projects: { id: string; name: string }[]; iterations: { id: string; name: string; projectId: string }[] }
 
-export type EventKind = 'state' | 'system' | 'input' | 'agent_text' | 'agent_item' | 'native' | 'test_output' | 'test_result'
+export type EventKind = 'state' | 'system' | 'input' | 'turn' | 'agent_text' | 'agent_item' | 'native' | 'test_output' | 'test_result'
 export type RunEvent = {
   seq: number; stageIndex: number; attempt: number; at: string; kind: EventKind; name: string; data: unknown
+}
+
+export type ConversationTurn = {
+  id: string; runId: string; stage: number; stageName?: string; attempt: number; seq?: number; end?: number
+  input: string; reply?: string; supplements?: string[]; at: string; status: RunStatus
+  nativeId?: string; canFork?: boolean; legacy?: boolean
+  files?: number; test?: Pick<TestResult, 'code' | 'ms'>
+}
+export type ConversationBranch = {
+  id: string; title: string; latestRunId: string; turns: ConversationTurn[]
+  source?: { branchId: string; turnId?: string; kind: 'fork' | 'handoff' | 'unknown' }
+}
+export type Conversation = {
+  id: string; title: string; activeBranchId: string; branches: ConversationBranch[]
 }
 
 export type EngineHealth = {

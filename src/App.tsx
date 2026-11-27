@@ -14,7 +14,7 @@ import { planBriefing } from './plan-summary.ts'
 import { PlansView } from './PlansView.tsx'
 import { PreferencesView } from './PreferencesView.tsx'
 import { RunView } from './run/RunView.tsx'
-import { TaskDialog } from './TaskDialog.tsx'
+import { ContinueTaskDialog, TaskDialog } from './TaskDialog.tsx'
 import { TaskHistory } from './TaskHistory.tsx'
 import { applyTheme, watchSystemTheme } from './theme.ts'
 import { ErrorLine, message } from './ui.tsx'
@@ -30,12 +30,16 @@ type Page = keyof typeof pages
 
 function location() {
   const [path, query] = window.location.hash.slice(1).split('?')
+  const params = new URLSearchParams(query)
   const [page, id, branch, iterationId] = path.split('/').filter(Boolean)
   const validId = /^[a-z0-9-]{1,100}$/i
   return { page: (page && Object.hasOwn(pages, page) ? page : 'projects') as Page,
     id: ['projects', 'runs'].includes(page) && validId.test(id ?? '') ? id : '',
     iterationId: page === 'projects' && branch === 'iterations' && validId.test(iterationId ?? '') ? iterationId : '',
-    focusElements: page === 'projects' && new URLSearchParams(query).get('section') === 'elements' }
+    focusElements: page === 'projects' && params.get('section') === 'elements',
+    turn: page === 'runs' ? params.get('turn') ?? undefined : undefined,
+    showRecords: page === 'runs' && params.has('records'),
+    executionFocus: page === 'runs' ? params.get('execution') ?? undefined : undefined }
 }
 
 const emptyCatalog: Catalog = { projects: [], iterations: [], resources: [], accounts: [], engines: [], templates: [] }
@@ -122,6 +126,13 @@ export function App() {
     setTaskTarget({ projectId: run.project.id, iterationId: run.iteration?.id, edit: run })
   }
 
+  function taskReady(run: Run) {
+    if (taskTarget?.edit) setRunVersion(value => value + 1)
+    setTaskTarget(null)
+    if (run.status !== 'saved') setRunning(true)
+    openRun(run.id)
+  }
+
   return <div className="app">
     <aside className="sidebar"><a className="brand" href="#/projects"><span className="brand-mark"><Layers3 size={23} strokeWidth={1.8} /></span><span><strong>Front Day<span className="brand-dot">.</span></strong><small>前端的一天</small></span></a>
       <nav aria-label="工作区"><div className="nav-label">工作区</div>{navigation.map(page => {
@@ -146,9 +157,11 @@ export function App() {
           {route.page === 'plans' && <PlansView key={preferences.dataDirectory} onChange={() => void refreshPlans()} />}
           {route.page === 'runs' && <>
             {route.id && <RunView key={`${route.id}-${runVersion}`} id={route.id} followOutput={preferences.followOutput} setArchived={setArchived} onContinue={continueTask} onEdit={editTask} optimizer={catalog.promptOptimizer} catalog={catalog}
+              focusTurn={route.turn} executionFocus={route.executionFocus} showRecords={route.showRecords}
               back={(projectId, iterationId) => go('projects', projectId,
               catalog.iterations.some(item => item.id === iterationId && item.projectId === projectId) ? iterationId : undefined)} />}
-            <TaskHistory visible={!route.id} catalog={catalog} projects={() => go('projects')} open={openRun} setArchived={setArchived} />
+            <TaskHistory key={preferences.dataDirectory} dataDirectory={preferences.dataDirectory} visible={!route.id} catalog={catalog}
+              projects={() => go('projects')} open={openRun} setArchived={setArchived} />
           </>}
           {route.page === 'templates' && <TemplatesView catalog={catalog} refresh={refresh} />}
           {route.page === 'settings' && <EnginesView catalog={catalog} refresh={refresh} />}
@@ -159,7 +172,9 @@ export function App() {
         </>}
       </main>
     </div>
-    {taskProject && (!taskTarget?.iterationId || taskIteration) && <TaskDialog project={taskProject} iteration={taskIteration} parent={taskTarget?.parent} run={taskTarget?.edit} catalog={catalog} preferences={preferences} close={() => setTaskTarget(null)}
-      onStart={run => { const editing = !!taskTarget?.edit; setTaskTarget(null); if (editing) setRunVersion(value => value + 1); if (run.status !== 'saved') setRunning(true); openRun(run.id) }} />}
+    {taskProject && (!taskTarget?.iterationId || taskIteration) && (taskTarget?.parent
+      ? <ContinueTaskDialog parent={taskTarget.parent} close={() => setTaskTarget(null)} onStart={taskReady} />
+      : <TaskDialog project={taskProject} iteration={taskIteration} run={taskTarget?.edit} catalog={catalog}
+        preferences={preferences} close={() => setTaskTarget(null)} onStart={taskReady} />)}
   </div>
 }

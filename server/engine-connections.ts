@@ -1,8 +1,10 @@
+import { execFile } from 'node:child_process'
 import { access, stat } from 'node:fs/promises'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { constants, statSync } from 'node:fs'
 import { delimiter, extname, isAbsolute, join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { promisify } from 'node:util'
 import type { Engine, EngineAvailability, EngineHealth, Provider } from '../shared/contracts.ts'
 import { engineGuides } from '../shared/engines.ts'
 import { errorMessage } from './errors.ts'
@@ -15,6 +17,8 @@ import type { EngineRpc, JsonObject, Receiver, RpcId } from './rpc.ts'
 
 const clientInfo = { name: 'front-day', title: 'Front Day', version: '0.1.0' }
 const probeTimeout = 8_000
+const runWindowsPowerShell = promisify(execFile)
+let codexDesktopCache: { expiresAt: number; result: Promise<string | null> } | undefined
 
 async function locateExecutable(names: string[], extraDirectories: string[] = []) {
   const windows = process.platform === 'win32'
@@ -35,7 +39,36 @@ async function locateExecutable(names: string[], extraDirectories: string[] = []
   return null
 }
 
-export function findExecutable(engine: Engine) {
+async function queryWindowsCodexDesktop() {
+  const systemRoot = process.env.SystemRoot
+  if (!systemRoot || !isAbsolute(systemRoot)) return null
+  const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const command = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction Stop"
+    + " | Where-Object PackageFamilyName -eq 'OpenAI.Codex_2p2nqsd0c76g0'"
+    + ' | Sort-Object { [version]$_.Version } -Descending | Select-Object -ExpandProperty InstallLocation'
+  try {
+    const { stdout } = await runWindowsPowerShell(powershell, ['-NoProfile', '-NonInteractive', '-Command', command],
+      { encoding: 'utf8', windowsHide: true, timeout: 5_000, maxBuffer: 64_000 })
+    const executables = stdout.split(/\r?\n/).map(location => location.trim()).filter(isAbsolute)
+      .map(location => join(location, 'app', 'resources', 'codex.exe'))
+    return locateExecutable(executables)
+  } catch { return null }
+}
+
+async function locateWindowsCodexDesktop() {
+  const cached = codexDesktopCache
+  if (cached && cached.expiresAt > Date.now()) {
+    const executable = await cached.result
+    if (!executable || await locateExecutable([executable])) return executable
+    if (codexDesktopCache && codexDesktopCache !== cached) return codexDesktopCache.result
+  }
+
+  const result = queryWindowsCodexDesktop()
+  codexDesktopCache = { result, expiresAt: Date.now() + 60_000 }
+  return result
+}
+
+export async function findExecutable(engine: Engine) {
   const home = homedir()
   const dirs = [join(home, '.local', 'bin'), join(home, '.opencode', 'bin')]
   if (process.env.APPDATA) dirs.push(join(process.env.APPDATA, 'npm'))
@@ -43,7 +76,9 @@ export function findExecutable(engine: Engine) {
     dirs.push(join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'))
     if (engine.provider === 'cursor') dirs.push(join(process.env.LOCALAPPDATA, 'cursor-agent'))
   }
-  return locateExecutable(engine.executable ? [engine.executable] : engineGuides[engine.provider].commands, dirs)
+  const executable = await locateExecutable(engine.executable ? [engine.executable] : engineGuides[engine.provider].commands, dirs)
+  if (executable || engine.executable || engine.provider !== 'codex' || process.platform !== 'win32') return executable
+  return locateWindowsCodexDesktop()
 }
 
 function codexProfile(excludeEnv: string[]) {

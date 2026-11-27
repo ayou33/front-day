@@ -448,7 +448,8 @@ export class Store {
 
   recentRuns(project: string, iteration: string | undefined, limit: number) {
     const where = iteration ? ' AND iteration_id = ?' : ''
-    return this.db.prepare(`SELECT json FROM run_summaries WHERE archived = 0 AND project_id = ?${where} ORDER BY updated_at DESC, id DESC LIMIT ?`)
+    return this.db.prepare(`SELECT json FROM run_summaries WHERE archived = 0 AND project_id = ?${where}
+      ORDER BY CASE WHEN status = 'saved' THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT ?`)
       .all(project, ...(iteration ? [iteration] : []), limit).map(parse<RunSummary>)
   }
 
@@ -473,18 +474,22 @@ export class Store {
       params.push(filters.query.toLowerCase(), filters.query.toLowerCase())
     }
     const filtered = where.join(' AND ')
-    const [updated, rootId] = filters.cursor?.split('|', 2) ?? []
-    const roots = this.db.prepare(`SELECT root_id, MAX(updated_at) AS latest FROM run_summaries
-      WHERE ${filtered} GROUP BY root_id
-      ${updated && rootId ? 'HAVING (latest, root_id) < (?, ?)' : ''} ORDER BY latest DESC, root_id DESC LIMIT ?`)
-      .all(...params, ...(updated && rootId ? [updated, rootId] : []), filters.limit + 1)
+    const [priority, updated, rootId] = filters.cursor?.split('|', 3) ?? []
+    const roots = this.db.prepare(`SELECT root_id, MAX(updated_at) AS latest,
+        MAX(CASE WHEN status = 'saved' THEN 1 ELSE 0 END) AS priority
+      FROM run_summaries WHERE ${filtered} GROUP BY root_id
+      ${updated && rootId ? 'HAVING (priority, latest, root_id) < (?, ?, ?)' : ''}
+      ORDER BY priority DESC, latest DESC, root_id DESC LIMIT ?`)
+      .all(...params, ...(updated && rootId ? [Number(priority ?? 0), updated, rootId] : []), filters.limit + 1)
     const page = roots.slice(0, filters.limit)
     const records = page.flatMap(({ root_id }) => {
       const runs = this.db.prepare(`SELECT json FROM run_summaries WHERE root_id = ? AND ${filtered} ORDER BY updated_at DESC, id DESC`)
         .all(String(root_id), ...params).map(parse<RunSummary>)
       const row = this.db.prepare('SELECT json FROM run_summaries WHERE id = ?').get(String(root_id))
       const source = row ? parse<RunSummary>(row) : runs[0]
-      return source && runs.length ? [{ source, runs }] : []
+      const forks = this.db.prepare(`SELECT COUNT(*) AS count FROM run_summaries WHERE root_id = ?
+        AND json_extract(json, '$.contextMode') = 'fork'`).get(String(root_id))
+      return source && runs.length ? [{ source, runs, forkCount: Number(forks?.count ?? 0) }] : []
     })
     const projects = this.db.prepare('SELECT project_id AS id, MAX(project_name) AS name FROM run_summaries GROUP BY project_id').all()
       .map(row => ({ id: String(row.id), name: String(row.name) }))
@@ -492,7 +497,7 @@ export class Store {
       .map(row => ({ id: String(row.id), name: String(row.name), projectId: String(row.project_id) }))
     const last = page.at(-1)
     const scopeHasRuns = !!this.db.prepare('SELECT 1 FROM run_summaries WHERE archived = ? LIMIT 1').get(Number(filters.archived))
-    return { records, projects, iterations, scopeHasRuns, next: last && roots.length > filters.limit ? `${last.latest}|${last.root_id}` : undefined }
+    return { records, projects, iterations, scopeHasRuns, next: last && roots.length > filters.limit ? `${last.priority}|${last.latest}|${last.root_id}` : undefined }
   }
 
   getRun(id: string): Run | undefined {
@@ -532,11 +537,19 @@ export class Store {
   append(run: Run, kind: EventKind, name: string, data: unknown) {
     const event = this.insertEvent(run, kind, name, data)
     this.events.emit(run.id, event)
+    return event
   }
 
   history(runId: string, after: number, limit = 500): RunEvent[] {
     return this.db.prepare('SELECT seq, json FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?')
       .all(runId, after, limit).map(row => ({ ...parse<RunEvent>(row), seq: Number(row.seq) }))
+  }
+
+  conversationEvents(runId: string): RunEvent[] {
+    return this.db.prepare(`SELECT seq, json FROM run_events WHERE run_id = ?
+      AND (json_extract(json, '$.kind') = 'turn'
+      OR (json_extract(json, '$.kind') = 'native' AND json_extract(json, '$.name') = 'turn/completed'))
+      ORDER BY seq`).all(runId).map(row => ({ ...parse<RunEvent>(row), seq: Number(row.seq) }))
   }
 
   attemptHistorySize(runId: string, stage: number, attempt: number) {

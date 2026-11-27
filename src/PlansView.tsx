@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AlertTriangle, CalendarRange, Check, ChevronLeft, ChevronRight, CircleDashed, LoaderCircle, Plus } from 'lucide-react'
 import type { PlanDayMarks, PlanItem } from '../shared/contracts.ts'
-import { localPlanDate, pastPlanDateError, planStatuses, planStatusLabels } from '../shared/plans.ts'
+import { isPlanOverdue, localPlanDate, pastPlanDateError, planCompleteBlockedReason, planStartBlockedReason, planStatuses, planStatusLabels } from '../shared/plans.ts'
 import type { PlanDates } from '../shared/plans.ts'
 import { request, saveConfig } from './api.ts'
 import { PlanCalendar } from './PlanCalendar.tsx'
+import { PlanContextMenu } from './PlanContextMenu.tsx'
+import type { PlanAction, PlanMenuPoint } from './PlanContextMenu.tsx'
 import { PlanDateMarksEditor } from './PlanDateMarks.tsx'
 import { earliestDate, latestDate, moveMonth, nextPlanDate, byPlanOrder } from './plan-calendar.ts'
 import { Dialog, Empty, ErrorLine, Field, SectionHeading, message } from './ui.tsx'
@@ -14,6 +16,7 @@ import './styles/plans.css'
 const earliestMonth = earliestDate.slice(0, 7)
 const latestMonth = latestDate.slice(0, 7)
 const planStatusIcons = { planned: CircleDashed, 'in-progress': LoaderCircle, done: Check }
+const planMonthLabel = (month: string) => `${Number(month.slice(0, 4))} 年 ${Number(month.slice(5))} 月`
 
 export function PlansView({ onChange }: { onChange?: () => void }) {
   const today = localPlanDate()
@@ -25,8 +28,17 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
   const [markError, setMarkError] = useState('')
   const [markLoadAttempt, setMarkLoadAttempt] = useState(0)
   const [movingId, setMovingId] = useState('')
+  const [menu, setMenu] = useState<{ item: PlanItem } & PlanMenuPoint | null>(null)
+  const [actingId, setActingId] = useState('')
+  const [monthPicker, setMonthPicker] = useState(false)
+  const [pickerYear, setPickerYear] = useState(() => Number(today.slice(0, 4)))
+  const monthWrap = useRef<HTMLSpanElement>(null)
+  const [wheelInverted, setWheelInverted] = useState(() => {
+    try { return localStorage.getItem('front-day-plan-wheel-inverted') === '1' } catch { return false }
+  })
   const [error, setError] = useState('')
   const [loadAttempt, setLoadAttempt] = useState(0)
+  const calendarPanel = useRef<HTMLElement>(null)
   const marksByDate = useMemo(() => new Map(marks?.map(entry => [entry.id, entry.marks])), [marks])
 
   useEffect(() => {
@@ -48,6 +60,49 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
     })
     return () => { active = false }
   }, [markLoadAttempt])
+
+  useEffect(() => {
+    try { localStorage.setItem('front-day-plan-wheel-inverted', wheelInverted ? '1' : '0') } catch { /* private mode */ }
+  }, [wheelInverted])
+
+  useEffect(() => {
+    if (!monthPicker) return
+    const close = (event: PointerEvent) => {
+      if (!monthWrap.current?.contains(event.target as Node)) setMonthPicker(false)
+    }
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMonthPicker(false)
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', key)
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', key) }
+  }, [monthPicker])
+
+  useEffect(() => {
+    const panel = calendarPanel.current
+    if (!panel) return
+    const state = { accumulated: 0, last: 0, lockedUntil: 0 }
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || movingId || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+      event.preventDefault()
+      const now = performance.now()
+      if (now < state.lockedUntil) return
+      if (now - state.last > 300) state.accumulated = 0
+      state.last = now
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1
+      state.accumulated += event.deltaY * scale
+      if (Math.abs(state.accumulated) < 80) return
+      const step = (state.accumulated > 0 ? 1 : -1) * (wheelInverted ? -1 : 1)
+      state.accumulated = 0
+      state.lockedUntil = now + 600
+      setMonth(current => {
+        const next = moveMonth(current, step)
+        return next < earliestMonth || next > latestMonth ? current : next
+      })
+    }
+    panel.addEventListener('wheel', onWheel, { passive: false })
+    return () => panel.removeEventListener('wheel', onWheel)
+  }, [movingId, wheelInverted])
 
   function add(startDate: string, endDate?: string) {
     if (movingId || startDate < localPlanDate()) return
@@ -105,23 +160,98 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
     onChange?.()
   }
 
+  async function act(action: PlanAction) {
+    const target = menu?.item
+    if (!target || actingId) return
+    setMenu(null)
+    if (action === 'start') {
+      const reason = planStartBlockedReason(target, today)
+      if (reason) { setError(reason); return }
+      setActingId(target.id)
+      setError('')
+      try {
+        storeItem(await saveConfig('plan-items', { ...target, status: 'in-progress', startDate: today }))
+        if (today.slice(0, 7) !== month) setMonth(today.slice(0, 7))
+        onChange?.()
+      } catch (error) { setError(`开始计划失败。${message(error)}`) }
+      finally { setActingId('') }
+      return
+    }
+    if (action === 'postpone') {
+      if (!isPlanOverdue(target, today)) { setError('只有已逾期的计划可以延期。'); return }
+      setActingId(target.id)
+      setError('')
+      try {
+        storeItem(await saveConfig('plan-items', { ...target, endDate: today, status: 'in-progress' }))
+        if (today.slice(0, 7) !== month) setMonth(today.slice(0, 7))
+        onChange?.()
+      } catch (error) { setError(`延期计划失败。${message(error)}`) }
+      finally { setActingId('') }
+      return
+    }
+    if (action === 'complete') {
+      const reason = planCompleteBlockedReason(target)
+      if (reason) { setError(reason); return }
+      setActingId(target.id)
+      setError('')
+      try {
+        storeItem(await saveConfig('plan-items', { ...target, status: 'done' }))
+        onChange?.()
+      } catch (error) { setError(`完成计划失败。${message(error)}`) }
+      finally { setActingId('') }
+      return
+    }
+    if (!window.confirm(`删除计划项「${target.name}」？`)) return
+    setActingId(target.id)
+    setError('')
+    try {
+      await request(`/config/plan-items/${encodeURIComponent(target.id)}`, 'DELETE')
+      setItems(list => list?.filter(item => item.id !== target.id) ?? [])
+      onChange?.()
+    } catch (error) { setError(`删除计划项失败。${message(error)}`) }
+    finally { setActingId('') }
+  }
+
   return <>
     <SectionHeading title="任务排期">
       <button className="button primary" type="button" disabled={!items || !!movingId}
         onClick={() => add(month <= today.slice(0, 7) ? today : `${month}-01`)}><Plus size={17} />添加计划项</button>
     </SectionHeading>
     {error && <ErrorLine text={error} />}
-    <section className="panel" aria-label="任务排期月历">
+    <section className="panel" aria-label="任务排期月历" ref={calendarPanel} title="滚动鼠标滚轮切换月份">
       <div className="panel-header plan-toolbar">
         <div className="plan-month-controls">
           <button className="icon-button" type="button" aria-label="上个月" title="上个月" disabled={month === earliestMonth}
             onClick={() => setMonth(moveMonth(month, -1))}><ChevronLeft size={17} /></button>
-          <input className="plan-month" type="month" aria-label="查看月份" min={earliestMonth} max={latestMonth} value={month} onChange={event => {
-            if (event.target.value.length === 7 && event.target.validity.valid) setMonth(event.target.value)
-          }} />
+          <span className="plan-month-wrap" ref={monthWrap}>
+            <button className="plan-month" type="button" aria-label="查看月份" aria-haspopup="dialog" aria-expanded={monthPicker}
+              onClick={() => { setPickerYear(Number(month.slice(0, 4))); setMonthPicker(true) }}>{planMonthLabel(month)}</button>
+            {monthPicker && <div className="plan-month-popover" role="dialog" aria-label="选择月份">
+              <div className="plan-month-popover-head">
+                <button className="icon-button" type="button" aria-label="上一年" title="上一年" disabled={pickerYear <= 1}
+                  onClick={() => setPickerYear(year => Math.max(1, year - 1))}><ChevronLeft size={15} /></button>
+                <input type="number" aria-label="年份" step={1} min={1} max={9999} value={Number.isNaN(pickerYear) ? '' : pickerYear}
+                  onChange={event => setPickerYear(event.target.valueAsNumber)} />
+                <button className="icon-button" type="button" aria-label="下一年" title="下一年" disabled={pickerYear >= 9999}
+                  onClick={() => setPickerYear(year => Math.min(9999, year + 1))}><ChevronRight size={15} /></button>
+              </div>
+              <div className="plan-month-grid">{Array.from({ length: 12 }, (_, index) => {
+                const value = `${String(pickerYear).padStart(4, '0')}-${String(index + 1).padStart(2, '0')}`
+                return <button key={value} type="button" aria-pressed={value === month} autoFocus={value === month}
+                  disabled={!Number.isInteger(pickerYear) || value < earliestMonth || value > latestMonth}
+                  onClick={() => { setMonth(value); setMonthPicker(false) }}>{index + 1} 月</button>
+              })}</div>
+            </div>}
+          </span>
           <button className="icon-button" type="button" aria-label="下个月" title="下个月" disabled={month === latestMonth}
             onClick={() => setMonth(moveMonth(month, 1))}><ChevronRight size={17} /></button>
-          <button className="button compact" type="button" onClick={() => setMonth(today.slice(0, 7))}>今天</button>
+          <button className={`button compact plan-month-now${month === today.slice(0, 7) ? '' : ' is-away'}`} type="button"
+            title="回到本月" onClick={() => setMonth(today.slice(0, 7))}>本月</button>
+          <label className="plan-wheel-toggle" title={wheelInverted ? '已开启反向：向上滚看上个月。点击关闭' : '开启后向上滚看上个月，向下滚看下个月'}>
+            <input type="checkbox" checked={wheelInverted} onChange={event => setWheelInverted(event.target.checked)} />
+            <span className="plan-wheel-toggle-track" aria-hidden="true"><i /></span>
+            <span>反向滚轮</span>
+          </label>
         </div>
         <ul className="plan-legend" aria-label="计划状态">{planStatuses.map(status => {
           const Icon = planStatusIcons[status]
@@ -130,7 +260,8 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
       </div>
       {items ? <PlanCalendar key={month} month={month} today={today} items={items} movingId={movingId} marksByDate={marksByDate}
         onAdd={add} onMarkDate={setMarkDate} onReorder={(item, targetIndex) => void reorder(item, targetIndex)}
-        onEdit={item => { if (!movingId) setEditing({ item }) }} onMove={(item, dates) => void move(item, dates)} /> :
+        onEdit={item => { if (!movingId) setEditing({ item }) }} onMove={(item, dates) => void move(item, dates)}
+        onContextMenu={(item, point) => { if (!movingId) setMenu({ item, ...point }) }} /> :
         error ? <Empty icon={CalendarRange} title="无法读取计划项" action={<button className="button" type="button" onClick={() => {
           setError(''); setLoadAttempt(attempt => attempt + 1)
         }}>重试</button>} /> : <div className="loading" role="status">正在读取计划项…</div>}
@@ -141,6 +272,8 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
       setEditing(null)
       onChange?.()
     }} />}
+    {menu && <PlanContextMenu key={menu.item.id} item={menu.item} point={{ x: menu.x, y: menu.y }} today={today}
+      onAction={action => void act(action)} onClose={() => setMenu(null)} />}
     {markDate && (marks ? <PlanDateMarksEditor key={markDate} date={markDate} marks={marksByDate.get(markDate) ?? []}
       close={() => setMarkDate('')} onSave={entry => {
         setMarks(list => [...(list ?? []).filter(day => day.id !== entry.id), ...(entry.marks.length ? [entry] : [])])

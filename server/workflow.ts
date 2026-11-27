@@ -4,15 +4,17 @@ import { resolve } from 'node:path'
 import { canArchiveTask, canEditTask, isApiExecutor, terminalStatuses } from '../shared/contracts.ts'
 import type { Attempt, AttemptFileChanges, ContextDifference, ContextSnapshot, Dispatch, Engine, Executor, Project, Run, RunStatus, Stage, StageSnapshot, Template } from '../shared/contracts.ts'
 import { taskElements, taskTypeLabel } from '../shared/context.ts'
+import { sessionFrom } from '../shared/continuations.ts'
 import { applyApiRestrictions, sharing, usesProjectFiles } from '../shared/task-context.ts'
 import { approvalLabels } from '../shared/engines.ts'
 import type { ApprovalMode } from '../shared/engines.ts'
 import type { Preferences } from '../shared/preferences.ts'
 import { checkEngine, findExecutable } from './engine-connections.ts'
-import { compatibleSession, projectEntries, resumeHistoryLimit, saveHandoff, sessionFrom, stamp } from './continuations.ts'
+import { compatibleSession, projectEntries, resumeHistoryLimit, saveHandoff, stamp } from './continuations.ts'
 import { buildPrompts, originalContext } from './run-prompt.ts'
 import type { ContextSource } from './run-prompt.ts'
 import type { ContextEntry } from './continuations.ts'
+import { forkSource } from './conversations.ts'
 import { EngineSession } from './engines.ts'
 import type { EngineHooks } from './engines.ts'
 import { HttpError, errorMessage } from './errors.ts'
@@ -24,10 +26,10 @@ import { projectDirectory, resolveResource, withinDirectory } from './resources.
 import type { JsonObject } from './rpc.ts'
 import { Store } from './storage.ts'
 
-type Followup = { text: string; delivered: Promise<boolean> }
+type Followup = { text: string; seq: number; delivered: Promise<boolean> }
 type Control = {
   run: Run; abort: AbortController; followups: Followup[]; agent?: EngineSession | ModelApiSession; command?: CommandProcess
-  gate?: ReturnType<typeof Promise.withResolvers<'next' | 'followup'>>; done?: Promise<void>; stopTimer?: NodeJS.Timeout
+  gate?: ReturnType<typeof Promise.withResolvers<'next' | 'followup'>>; done?: Promise<void>; stopTimer?: NodeJS.Timeout; turn?: number
 }
 
 const runningStatuses = new Set<RunStatus>(['running', 'waiting_input', 'waiting_approval', 'waiting_stage'])
@@ -99,6 +101,9 @@ export class Workflow {
     if (parent && input.continuation?.mode === 'resume' && (template || !compatibleSession(parent, project.directory, stages[0]))) {
       throw new HttpError(400, '续接原会话需要沿用工作目录、引擎、模型和运行模式，并直接执行。也可选择用交接摘要开启新会话。')
     }
+    if (parent && input.continuation?.mode === 'fork' && (template || !forkSource(this.store, parent, project.directory, stages[0], input.continuation.turn))) {
+      throw new HttpError(409, '无法从所选轮次创建分支，请核对项目目录和 Codex 引擎配置')
+    }
     const duplicate = this.store.getRun(input.requestId)
     if (duplicate) return duplicate
     if (this.closing) throw new HttpError(503, '服务正在退出')
@@ -127,10 +132,12 @@ export class Workflow {
     const resources = taskElements(catalog.resources, project.id, input.iterationId)
     const taskType = input.taskType ?? preferences.defaultTaskType
     const previousExecutor = parent && (sessionFrom(parent)?.engine ?? parent.stages[parent.stageIndex]?.engine)
+    const reuseMode = input.continuation?.mode === 'resume' || input.continuation?.mode === 'fork'
     const configured = this.store.getExecutor(input.engineId || previousExecutor?.id || preferences.defaultEngineId)
     const directStage: Stage = {
       name: taskType ? taskTypeLabel(taskType) : '任务执行', kind: 'agent', prompt: '', engineId: '',
-      mode: taskType === 'requirements' ? 'ask' : '', resourceIds: [], allResources: true,
+      mode: reuseMode && previousExecutor ? previousExecutor.mode : taskType === 'requirements' ? 'ask' : '',
+      resourceIds: [], allResources: true,
       advance: 'auto', testCommand: null, analyzeTest: false, acceptance: input.acceptance,
     }
     const planned = template?.stages ?? [directStage]
@@ -199,6 +206,20 @@ export class Workflow {
     )
     if (this.requireEditableRun(id).revision !== run.revision) throw new HttpError(409, '任务已变更，请重新查看提示词')
     return { text: (useResume && resumePrompt) || freshPrompt(parent, shareHandoff), edited: false }
+  }
+
+  async desktopPrompt(id: string, stageIndex: number) {
+    const run = this.requireUnarchivedRun(id)
+    const snapshot = canEditTask(run) ? { ...run, ...this.latestContext(run), stageIndex } : { ...run, stageIndex }
+    const stage = snapshot.stages[stageIndex]
+    if (!stage) throw new HttpError(404, '找不到任务阶段')
+    const { freshPrompt, parent, shareHandoff } = await this.preparePrompts(
+      snapshot, stage, AbortSignal.timeout(15_000), undefined, true, true,
+    )
+    if (this.requireUnarchivedRun(id).revision !== run.revision && canEditTask(run)) {
+      throw new HttpError(409, '任务已更新，请重新复制')
+    }
+    return { text: freshPrompt(parent, shareHandoff) }
   }
 
   updatePrompt(id: string, stageIndex: number, text: string | null, revision?: number) {
@@ -496,15 +517,17 @@ export class Workflow {
         attempt.contextMode === 'resume' && attempt.sessionId === source.sessionId && attempt.startedAt >= source.startedAt)))
   }
 
-  private async preparePrompts(run: Run, stage: StageSnapshot, signal: AbortSignal, testLogs?: string, preview = false) {
+  private async preparePrompts(run: Run, stage: StageSnapshot, signal: AbortSignal, testLogs?: string, preview = false, desktop = false) {
     const origin = this.origin()
     const parent = run.continuation && this.requireRun(run.continuation.parentId)
+    const fork = parent && run.continuation?.mode === 'fork'
+      ? forkSource(this.store, parent, run.project.directory, stage, run.continuation.turn) : undefined
     const source = parent && run.stageIndex === 0 && !run.templateName && run.continuation?.mode !== 'handoff'
-      ? compatibleSession(parent, run.project.directory, stage) : undefined
+      ? run.continuation?.mode === 'fork' ? fork : compatibleSession(parent, run.project.directory, stage) : undefined
     const history = parent && source ? source.attempt.historyChars ?? this.store.attemptHistorySize(parent.id, source.index, source.attempt.number) : 0
-    const canResume = parent && source && !this.sessionHasNewerTurns(run, parent, stage.engine!.provider, source.attempt)
+    const canResume = parent && source && (fork || !this.sessionHasNewerTurns(run, parent, stage.engine!.provider, source.attempt))
     const scopeChanged = parent && !!run.details?.scope && run.details.scope !== parent.details?.scope
-    const compareContext = canResume && (run.continuation?.mode === 'resume' ||
+    const compareContext = !!canResume && (run.continuation?.mode === 'resume' || !!fork ||
       (history <= resumeHistoryLimit && !scopeChanged && run.taskType !== 'migration'))
     const sources: ContextSource[] = []
     const entries = projectEntries(run)
@@ -518,12 +541,13 @@ export class Workflow {
         if (!resource) throw new Error(`资源「${id}」已删除`)
         const level = resource.iterationId ? '迭代要素' : '项目要素'
         const entryId = `resource:${resource.id}`
+        const detailUrl = `${origin}/api/runs/${encodeURIComponent(run.id)}/context/${encodeURIComponent(entryId)}?stage=${run.stageIndex}`
         if (apiExecutor) {
           const mode = sharing(resource, run, stage)
           if (mode === 'excluded') continue
           if (mode === 'on-demand') {
             const source = { id: entryId, level, reference: true, name: resource.name, category: resource.category,
-              source: '通过资料工具按需读取', content: '', prompt: '' } satisfies ContextSource
+              source: desktop ? '通过任务资料索引按需读取' : '通过资料工具按需读取', content: desktop ? detailUrl : '', prompt: '' } satisfies ContextSource
             sources.push(source)
             entries.push({ id: entryId, label: resource.name, value: '' })
             continue
@@ -532,7 +556,7 @@ export class Workflow {
         const deferred = resource.kind === 'url' && resource.fetch && (preview || !!stage.promptOverride || (!!parent && !compareContext))
         const resolved = preview && deferred
           ? { name: resource.name, category: resource.category, prompt: resource.prompt, source: '通过任务资料索引读取在线资料',
-              content: apiExecutor ? entryId : `${origin}/api/runs/${encodeURIComponent(run.id)}/context/${encodeURIComponent(entryId)}?stage=${run.stageIndex}` }
+              content: apiExecutor && !desktop ? entryId : detailUrl }
           : await resolveResource(deferred ? { ...resource, fetch: false } : resource, run.accounts,
               run.project.directory, signal, account => this.store.readAccountPassword(account))
         const reference = resource.kind === 'file' || (resource.kind === 'url' && (!resource.fetch || deferred))
@@ -554,10 +578,10 @@ export class Workflow {
     const prompts = buildPrompts({
       run, stage, parent, source, previous, sources, entries, missing,
       testLogs: outgoingLogs,
-      origin, compareContext, preview,
+      origin, compareContext, preview, desktop,
       original: source?.attempt.contextStamps ?? (parent && source ? originalContext(parent, source.stage) : []),
     })
-    return { ...prompts, parent, source, history, entries, shareHandoff: !restricted }
+    return { ...prompts, parent, source, fork, history, entries, shareHandoff: !restricted }
   }
 
   private async runAgent(control: Control, stage: StageSnapshot, attempt: Attempt, testLogs?: string) {
@@ -569,7 +593,7 @@ export class Workflow {
     }
     const executable = isApiExecutor(engine) ? undefined : await findExecutable(engine)
     if (!isApiExecutor(engine) && !executable) throw new Error(`未找到 ${engine.name} 的本地 CLI，请检查引擎设置`)
-    const { freshPrompt, resumePrompt, useResume, parent, source, history, entries, shareHandoff } = await this.preparePrompts(run, stage, abort.signal, testLogs)
+    const { freshPrompt, resumePrompt, useResume, parent, source, fork, history, entries, shareHandoff } = await this.preparePrompts(run, stage, abort.signal, testLogs)
     this.store.append(run, 'system', isApiExecutor(engine) ? '连接 API' : '连接 Agent', { text: engine.name })
     const hooks: EngineHooks = {
       emit: (kind, name, data) => {
@@ -605,7 +629,10 @@ export class Workflow {
     let agent = connect()
     control.agent = agent
     let resumed = Boolean(useResume && source?.attempt.sessionId)
-    try { await agent.start(abort.signal, resumed ? source?.attempt.sessionId : undefined) }
+    try {
+      if (fork && agent instanceof EngineSession) await agent.start(abort.signal, fork.attempt.sessionId, fork.nativeId)
+      else await agent.start(abort.signal, resumed ? source?.attempt.sessionId : undefined)
+    }
     catch (error) {
       if (!resumed || run.continuation?.mode !== 'auto' || abort.signal.aborted) throw error
       await agent.close()
@@ -619,16 +646,32 @@ export class Workflow {
     attempt.sessionId = agent.sessionId
     if (agent instanceof ModelApiSession) attempt.apiMetrics = agent.metrics
     attempt.contextStamps = stage.promptOverride ? [] : entries.map(stamp)
-    attempt.contextMode = parent ? resumed ? 'resume' : 'handoff' : undefined
+    attempt.contextMode = parent ? resumed ? fork ? 'fork' : 'resume' : 'handoff' : undefined
     const prompt = (!stage.promptOverride && resumed && resumePrompt) || freshPrompt(parent, shareHandoff)
     attempt.historyChars = (attempt.historyChars ?? 0) + prompt.length + (resumed ? history : 0)
     this.save(run)
     this.store.append(run, 'input', run.goal ? '发送给 Agent 的任务上下文' : '阶段输入', { text: prompt })
-    const output = await agent.prompt(prompt)
+    const output = await this.promptTurn(control, attempt, prompt, run.goal || run.title)
     abort.signal.throwIfAborted()
-    return this.drainFollowups(control, saveHandoff(attempt, output))
+    return this.drainFollowups(control, output)
   }
 
+  private async promptTurn(control: Control, attempt: Attempt, prompt: string, text: string, followup?: number) {
+    const { run, agent, abort } = control
+    const turn = this.store.append(run, 'turn', 'started', { text, followup }).seq
+    control.turn = turn
+    try {
+      const output = saveHandoff(attempt, await agent!.prompt(prompt))
+      this.store.append(run, 'turn', 'finished', { turn, text: output, status: 'succeeded',
+        nativeId: agent instanceof EngineSession ? agent.lastNativeTurnId : undefined })
+      return output
+    } catch (error) {
+      this.store.append(run, 'turn', 'finished', { turn, status: abort.signal.aborted ? 'stopped' : 'failed' })
+      throw error
+    } finally {
+      control.turn = undefined
+    }
+  }
 
   private async drainFollowups(control: Control, output: string) {
     while (control.followups.length) {
@@ -637,9 +680,9 @@ export class Workflow {
       if (await followup.delivered) continue
       control.abort.signal.throwIfAborted()
       this.store.append(control.run, 'system', '已发送补充消息', { text: '同一会话的新轮次' })
-      const result = await control.agent!.prompt(followup.text)
       const attempt = control.run.attempts[control.run.stageIndex].at(-1)!
-      if (result) output = saveHandoff(attempt, result)
+      const result = await this.promptTurn(control, attempt, followup.text, followup.text, followup.seq)
+      if (result) output = result
     }
     return output
   }
@@ -684,12 +727,16 @@ export class Workflow {
     const agent = control.agent
     const attempt = control.run.attempts[control.run.stageIndex].at(-1)!
     attempt.historyChars = (attempt.historyChars ?? 0) + text.length
-    this.store.append(control.run, 'input', '补充消息', { text })
+    const seq = this.store.append(control.run, 'input', '补充消息', { text }).seq
+    const turn = control.turn
     const delivered = agent.canSteer ? agent.steer(text).then(sent => {
-      if (sent) this.store.append(control.run, 'system', '已发送补充消息', { text: '追加到当前轮次' })
+      if (sent) {
+        this.store.append(control.run, 'system', '已发送补充消息', { text: '追加到当前轮次' })
+        this.store.append(control.run, 'turn', 'supplement', { turn, followup: seq, text })
+      }
       return sent
     }).catch(() => false) : Promise.resolve(false)
-    control.followups.push({ text, delivered })
+    control.followups.push({ text, seq, delivered })
     if (control.gate) this.releaseGate(control, 'followup')
   }
 
@@ -770,7 +817,7 @@ export class Workflow {
 
   setArchived(id: string, archived: boolean) {
     const run = this.requireRun(id)
-    if (run.continuation) throw new HttpError(409, '请在主会话上归档或恢复')
+    if (run.continuation) throw new HttpError(409, '请在任务记录中归档或恢复整个会话')
     const runs = this.store.listRuns()
     const ids = new Set([id])
     for (let added = true; added;) {

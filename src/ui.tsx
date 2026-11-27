@@ -1,6 +1,6 @@
 import { Children, cloneElement, isValidElement, useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
-import { AlertCircle, ArrowUpRight, X } from 'lucide-react'
+import { AlertCircle, ArrowUpRight, CircleCheck, CircleDashed, CircleX, Clock, Hourglass, LoaderCircle, Square, TriangleAlert, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { taskTypeGroups, taskTypes } from '../shared/context.ts'
 import { statusLabels } from '../shared/contracts.ts'
@@ -20,8 +20,16 @@ export function formatDuration(ms?: number) {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
 }
 
+const statusIcons: Record<RunStatus, LucideIcon> = {
+  saved: CircleDashed, queued: Clock, running: LoaderCircle, stopping: LoaderCircle,
+  waiting_input: Hourglass, waiting_approval: Hourglass, waiting_stage: Hourglass,
+  succeeded: CircleCheck, failed: CircleX, stopped: Square, interrupted: TriangleAlert,
+}
+
 export function Status({ status }: { status: RunStatus }) {
-  return <span className={`status status--${status}`}><i />{statusLabels[status]}</span>
+  const Icon = statusIcons[status]
+  const spinning = status === 'running' || status === 'stopping'
+  return <span className={`status status--${status}`}><Icon className={spinning ? 'status-spin' : undefined} size={12} aria-hidden="true" />{statusLabels[status]}</span>
 }
 
 export function ErrorLine({ text }: { text: string }) {
@@ -102,8 +110,9 @@ export function Dialog({ title, note, onClose, children, wide }: { title: string
   </dialog>
 }
 
-export function EditForm({ onSubmit, onSave, onClose, children, submitLabel = '保存配置', saveLabel = '保存', submitDisabled = false }: {
-  onSubmit: () => Promise<void>; onSave?: () => Promise<void>; onClose: () => void; children: ReactNode; submitLabel?: string; saveLabel?: string; submitDisabled?: boolean
+export function EditForm({ onSubmit, onSave, onClose, children, submitLabel = '保存配置', saveLabel = '保存', submitDisabled = false, saveDisabled = false }: {
+  onSubmit: () => Promise<void>; onSave?: () => Promise<void>; onClose: () => void; children: ReactNode
+  submitLabel?: string; saveLabel?: string; submitDisabled?: boolean; saveDisabled?: boolean
 }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -122,7 +131,7 @@ export function EditForm({ onSubmit, onSave, onClose, children, submitLabel = '�
   return <form onSubmit={submit} className="edit-form">
     <div className="dialog-body">{children}<ErrorLine text={error} /></div>
     <div className="dialog-footer"><button type="button" className="button" onClick={onClose}>取消</button>
-      {onSave && <button type="button" className="button" disabled={busy} onClick={() => void invoke(onSave)}>{busy ? '正在提交…' : saveLabel}</button>}
+      {onSave && <button type="button" className="button" disabled={busy || saveDisabled} onClick={() => void invoke(onSave)}>{busy ? '正在提交…' : saveLabel}</button>}
       <button className="button primary" disabled={busy || submitDisabled}>{busy ? '正在提交…' : submitLabel}</button></div>
   </form>
 }

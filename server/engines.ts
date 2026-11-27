@@ -59,6 +59,7 @@ export class EngineSession {
   private hooks: EngineHooks
   private approvalMode: ApprovalMode
   sessionId = ''
+  lastNativeTurnId?: string
 
   constructor(config: Engine, executable: string, cwd: string, excludeEnv: string[], hooks: EngineHooks) {
     this.config = config
@@ -76,20 +77,21 @@ export class EngineSession {
     })
   }
 
-  async start(signal: AbortSignal, resumeId?: string) {
+  async start(signal: AbortSignal, resumeId?: string, forkTurnId?: string) {
     const abort = () => { void this.close() }
     signal.addEventListener('abort', abort, { once: true })
     try {
       signal.throwIfAborted()
       const init = await initializeEngine(this.rpc, this.config.provider)
       if (this.acp) {
+        if (forkTurnId) throw new Error('当前引擎尚未接入指定轮次的分支')
         this.loadingHistory = !!resumeId
         this.sessionId = await openAcpSession(this.rpc, this.config, this.cwd, init, resumeId)
         this.loadingHistory = false
       } else {
         const account = await this.rpc.call('account/read', { refreshToken: false })
         if (codexAuth(account) === 'required') throw new Error('当前 Codex CLI 会话尚未登录。请在「引擎」核对路径和登录方式。')
-        const session = await openCodexThread(this.rpc, this.config, this.cwd, resumeId)
+        const session = await openCodexThread(this.rpc, this.config, this.cwd, resumeId, false, forkTurnId)
         this.sessionId = session.id
         this.model = session.model
       }
@@ -108,6 +110,7 @@ export class EngineSession {
     if (this.closed || this.active) throw new Error('Agent 会话当前无法启动对话')
     const turn: ActiveTurn = { key: `turn-${++this.turnNumber}`, id: '', output: '', partial: '', final: false, done: Promise.withResolvers<string>() }
     this.active = turn
+    this.lastNativeTurnId = undefined
     void turn.done.promise.catch(() => {})
     const input = [{ type: 'text', text }]
     try {
@@ -130,6 +133,7 @@ export class EngineSession {
       if (this.acp && acpAuthRequired(error)) throw this.authenticationError()
       throw error
     } finally {
+      if (!this.acp) this.lastNativeTurnId = turn.id || undefined
       this.active = undefined
       this.clearRequests()
     }

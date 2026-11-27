@@ -49,14 +49,17 @@ export async function openAcpSession(rpc: EngineRpc, engine: Engine, cwd: string
   return id
 }
 
-export async function openCodexThread(rpc: EngineRpc, engine: Engine, cwd: string, resumeId?: string, probe = false) {
-  const session = await rpc.call(resumeId ? 'thread/resume' : 'thread/start', {
+export async function openCodexThread(rpc: EngineRpc, engine: Engine, cwd: string, resumeId?: string, probe = false, forkTurnId?: string) {
+  const session = await rpc.call(forkTurnId ? 'thread/fork' : resumeId ? 'thread/resume' : 'thread/start', {
     cwd, ...(engine.model && { model: engine.model }),
     sandbox: engine.mode === 'agent' ? 'workspace-write' : 'read-only', approvalPolicy: 'on-request',
     ...(resumeId && { threadId: resumeId, excludeTurns: true }),
+    ...(forkTurnId && { lastTurnId: forkTurnId }),
     ...(probe && { ephemeral: true }),
   }, sessionSetupTimeout)
   const id = string(object(session.thread).id)
   if (!id) throw new Error('Codex 未返回会话 ID')
+  if (forkTurnId && id === resumeId) throw new Error('Codex 未返回新的分支 ID')
+  if (resumeId && !forkTurnId && id !== resumeId) throw new Error('Codex 返回的会话 ID 与要续接的原会话不一致')
   return { id, model: string(session.model) || engine.model }
 }

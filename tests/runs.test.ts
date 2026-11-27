@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { canArchiveTask } from '../shared/contracts.ts'
-import type { Account, AgentPromptPreview, ArchivedRun, Catalog, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
+import type { Account, AgentPromptPreview, ArchivedRun, Catalog, Conversation, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
 import type { Preferences } from '../shared/preferences.ts'
 import { engineGuides, engineProviders } from '../shared/engines.ts'
 import { Store } from '../server/storage.ts'
@@ -206,7 +206,8 @@ test('继续修改可复用原生会话和资料差异，也可用交接摘要�
     const parent = await waitForRun(api, (await start('完成表单 CONTINUATION_SUMMARY')).id, 'succeeded')
     const firstAttempt = parent.attempts[0][0]
     assert.equal(firstAttempt.handoff?.files, 'src/form.ts')
-    assert.doesNotMatch(firstAttempt.output ?? '', /front-day-handoff/)
+    assert.match(firstAttempt.output ?? '', /本地预览服务已结束。/)
+    assert.doesNotMatch(firstAttempt.output ?? '', /front-day-handoff|"changes":/)
     await api(`/config/resources/${change.id}`, 'PUT', { ...change, value: `当前接口字段 ${provider}`, prompt: '提取当前接口必填字段' })
     if (provider === 'cursor') await api(`/config/resources/${removed.id}`, 'DELETE')
     const child = await waitForRun(api, (await start('新增提交后聚焦', { parentId: parent.id, mode: 'auto' })).id, 'succeeded')
@@ -219,6 +220,11 @@ test('继续修改可复用原生会话和资料差异，也可用交接摘要�
     assert.match(resume.prompt, /解析要求 · 提取当前接口必填字段/)
     assert.match(resume.prompt, /## 本次执行与验收[\s\S]*检查键盘焦点/)
     assert.doesNotMatch(resume.prompt, /原项目长背景|沿用的内容|旧接口字段|旧材料全文/)
+    const desktop = await api<{ text: string }>(`/runs/${child.id}/desktop-prompt`)
+    assert.match(desktop.text, /## 任务目标\n新增提交后聚焦/)
+    assert.match(desktop.text, /原项目长背景/)
+    assert.match(desktop.text, /沿用的内容/)
+    assert.match(desktop.text, /## 原任务交接摘要/)
     if (provider === 'cursor') assert.match(resume.prompt, /已移除或当前不可用的旧上下文\n待移除材料/)
     assert.equal(resume.events.some(event => JSON.stringify(event.data).includes('旧会话回放标记')), false)
 
@@ -255,6 +261,16 @@ test('自动续改在原会话不存在时回退到交接摘要', async t => {
   const completed = await waitForRun(api, child.id, 'succeeded')
   assert.equal(completed.attempts[0][0].contextMode, 'handoff')
   assert.match(completed.attempts[0][0].output ?? '', /已处理/)
+  const conversation = await api<Conversation>(`/runs/${child.id}/conversation`)
+  const root = conversation.branches.find(branch => branch.id === parent.id)!
+  const next = conversation.branches.find(branch => branch.id === child.id)!
+  assert.deepEqual(next.source, { branchId: root.id, turnId: root.turns.at(-1)?.id, kind: 'handoff' })
+
+  const strict = await api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id,
+    goal: '仅续接原会话', continuation: { parentId: parent.id, mode: 'resume' } })
+  const failed = await waitForRun(api, strict.id, 'failed')
+  assert.match(failed.error ?? '', /Session not found/)
+  assert.equal(failed.attempts[0][0].sessionId, undefined)
 })
 
 test('项目是必选项，直接任务可补充类型和细节并自行探索缺失资料', async t => {
@@ -518,7 +534,7 @@ test('归档主任务时连同续改任务一起归档，恢复同样联动', as
     continuation: { parentId: second.id, mode: 'handoff' } })
   await waitForRun(app.api, third.id, 'succeeded')
 
-  await assert.rejects(app.api(`/runs/${second.id}/archive`, 'POST', {}), /主会话/)
+  await assert.rejects(app.api(`/runs/${second.id}/archive`, 'POST', {}), /整个会话/)
   await app.api(`/runs/${first.id}/archive`, 'POST', {})
   for (const id of [first.id, second.id, third.id]) assert.ok((await app.api<Run>(`/runs/${id}`)).archivedAt, id)
   await app.api(`/runs/${first.id}/unarchive`, 'POST', {})

@@ -58,6 +58,7 @@ export const dispatchSchema = z.object({
   taskType: z.string().trim().max(100).optional(), details: taskContext.optional(), brief: notes.default(''),
   templateId: id.optional(), engineId: z.string().optional(), approvalMode: z.enum(approvalModes).optional(),
   apiFiles: z.boolean().optional(), apiExcluded: z.array(id).max(1000).optional(), acceptance: z.enum(['changes', 'test']).optional(),
-  continuation: z.object({ parentId: id, mode: z.enum(continuationModes).default('auto') }).optional(),
+  continuation: z.object({ parentId: id, mode: z.enum(continuationModes).default('auto'), turn: z.number().int().positive().safe().optional() })
+    .refine(value => value.mode === 'fork' ? !!value.turn : !value.turn, { message: '请选择有效的分叉轮次' }).optional(),
   start: z.boolean().optional(),
 }).refine(input => input.goal || input.title, { message: '请输入任务目标' })

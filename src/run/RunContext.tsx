@@ -5,6 +5,7 @@ import type { Handoff } from '../../shared/continuations.ts'
 import type { PromptOptimizerSettings } from '../../shared/prompt-optimizer.ts'
 import { AgentPrompt } from './AgentPrompt.tsx'
 import { ContextScope } from '../ContextScope.tsx'
+import { HandoffSummary } from './Transcript.tsx'
 
 export function RunContext({ run, stageIndex, sentPrompt, handoff, historical, optimizer, onSaved, difference, catalog }: {
   run: Run; stageIndex: number; sentPrompt: string; handoff?: Handoff; historical: boolean; optimizer?: PromptOptimizerSettings; onSaved: (run: Run) => void
@@ -49,10 +50,7 @@ export function RunContext({ run, stageIndex, sentPrompt, handoff, historical, o
         迭代说明: run.savedContext.iteration?.description, 要素: run.savedContext.resources.map(({ name, value, prompt }) => ({ name, value, prompt })) }, null, 2)}</pre>
     </div></details>}
     {sentPrompt && <details className="event-item" open={historical || undefined}><summary>本次发送给 Agent 的提示词</summary><pre>{sentPrompt}</pre></details>}
-    {handoff && <details className="event-item"><summary>交接摘要</summary><dl className="project-facts handoff-facts">
-      {[['已完成', handoff.changes], ['关键约束', handoff.constraints], ['相关文件', handoff.files], ['验证结果', handoff.verification]].map(([label, value]) =>
-        <div key={label}><dt>{label}</dt><dd>{value || '未记录'}</dd></div>)}
-    </dl></details>}
+    {handoff && <HandoffSummary handoff={handoff} />}
     {!sentPrompt && (run.stages[stageIndex]?.engine
       ? !editable && <p className="caption">暂无发送给 Agent 的提示词记录。</p>
       : <p className="caption">此阶段仅执行测试命令。可选择 Agent 阶段查看提示词。</p>)}
