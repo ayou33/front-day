@@ -16,6 +16,10 @@ export function InteractionCard({ interaction, disabled, onAnswer }: { interacti
     {interaction.detail && !legacyRaw && <p className="interaction-description">{interaction.detail}</p>}
     {!!interaction.fields?.length && <dl className="approval-fields">{interaction.fields.map(({ label, value, code }) =>
       <div key={label}><dt>{label}</dt><dd className={code ? 'mono' : undefined}>{value}</dd></div>)}</dl>}
+    {interaction.change && <details className="resource-detail">
+      <summary>查看文件差异 · {interaction.change.beforeBytes.toLocaleString()} → {interaction.change.afterBytes.toLocaleString()} 字节</summary>
+      <pre className="approval-diff">{interaction.change.preview}</pre>
+    </details>}
     {raw && <details className="resource-detail"><summary>查看原始请求</summary><pre>{raw}</pre></details>}
     {interaction.type === 'form' && <Field label="JSON 回复"><textarea rows={5} className="mono" value={form} onChange={event => setForm(event.target.value)} /></Field>}
     {interaction.questions?.map(question => <div className="question" key={question.id}>

@@ -3,11 +3,11 @@ import { EventEmitter } from 'node:events'
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { Account, Catalog, Config, ConfigKind, Entity, EventKind, IterationSnapshot, Run, RunEvent, RunState, RunSummary } from '../shared/contracts.ts'
-import { legacyIterationElements } from '../shared/context.ts'
+import type { Account, ApiExecutor, Catalog, Config, ConfigKind, Entity, EventKind, Executor, IterationSnapshot, Run, RunEvent, RunGroup, RunPage, RunState, RunSummary } from '../shared/contracts.ts'
+import { legacyIterationElements, taskTypeLabel } from '../shared/context.ts'
 import { engineGuides, engineProviders } from '../shared/engines.ts'
-import { defaultPromptOptimizer, optimizerProviderOptions, promptOptimizerProviders } from '../shared/prompt-optimizer.ts'
-import type { PromptOptimizerConfig, PromptOptimizerProfile, PromptOptimizerProvider, PromptOptimizerSettings } from '../shared/prompt-optimizer.ts'
+import { defaultPromptOptimizer, modelApiId, modelApiName, optimizerProviderOptions, promptOptimizerProviders, supportsApiPurpose } from '../shared/prompt-optimizer.ts'
+import type { ModelApiConfig, ModelApiProfile, ModelApiPurpose, PromptOptimizerProvider, PromptOptimizerSelection, PromptOptimizerSettings } from '../shared/prompt-optimizer.ts'
 import { HttpError } from './errors.ts'
 import { AccountSecrets } from './secrets.ts'
 import { builtinTemplates, seedStages } from './seed.ts'
@@ -21,10 +21,12 @@ function accountBinding(account: Account) {
 }
 
 const optimizerKey = 'prompt-optimizer'
-type StoredOptimizerProfile = { model: string; sealed?: string }
-type StoredOptimizer = Pick<PromptOptimizerConfig, 'enabled' | 'provider'> & {
-  profiles: Partial<Record<PromptOptimizerProvider, StoredOptimizerProfile>>
-}
+const executorSettingsKey = 'executor-settings-v1'
+type StoredProfiles = Partial<Record<PromptOptimizerProvider, { model: string; sealed?: string }>>
+type StoredApi = ModelApiConfig & { name?: string; purpose?: ModelApiPurpose; sealed?: string }
+type StoredExecutors = { optimizer: PromptOptimizerSelection; profiles: StoredProfiles; custom?: Record<string, StoredApi> }
+type LegacyOptimizer = { enabled: boolean; provider: PromptOptimizerProvider } & ({ profiles: StoredProfiles } | { model: string; sealed?: string })
+type HistoryFilters = { archived: boolean; limit: number; projectId?: string; iterationId?: string; status?: string; query?: string; cursor?: string }
 
 function optimizerBinding(provider: PromptOptimizerProvider) {
   // Keep the original binding for previously saved DeepSeek keys.
@@ -70,6 +72,18 @@ export class Store {
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS run_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS run_events_order ON run_events(run_id, seq);
+      CREATE TABLE IF NOT EXISTS run_summaries (
+        id TEXT PRIMARY KEY REFERENCES runs(id), root_id TEXT NOT NULL, project_id TEXT NOT NULL, project_name TEXT NOT NULL,
+        iteration_id TEXT NOT NULL, iteration_name TEXT NOT NULL, archived INTEGER NOT NULL, status TEXT NOT NULL,
+        updated_at TEXT NOT NULL, created_at TEXT NOT NULL, search TEXT NOT NULL, json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS summary_by_archive ON run_summaries(archived, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS summary_by_project ON run_summaries(archived, project_id, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS summary_by_iteration ON run_summaries(archived, project_id, iteration_id, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS summary_by_iteration_only ON run_summaries(archived, iteration_id, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS summary_scopes ON run_summaries(project_id, iteration_id, project_name, iteration_name);
+      CREATE INDEX IF NOT EXISTS summary_by_root ON run_summaries(root_id, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS summary_by_status ON run_summaries(status);
     `)
     if (!this.db.prepare('SELECT 1 FROM settings WHERE key = ?').get('seed-v1')) {
       this.transaction(() => {
@@ -91,6 +105,60 @@ export class Store {
       this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(enginesVersion, 'true')
     })
     this.seedBuiltinTemplates()
+    this.migrateFolderResources()
+    this.migrateRunStart()
+    this.migrateRunSummaries()
+  }
+
+  private migrateRunSummaries() {
+    const version = 'run-summaries-v1'
+    if (this.db.prepare('SELECT 1 FROM settings WHERE key = ?').get(version)) return
+    this.transaction(() => {
+      const runs = this.listRuns().reverse()
+      const byId = new Map(runs.map(run => [run.id, run]))
+      for (const run of runs) {
+        let root = run
+        const visited = new Set([run.id])
+        while (root.continuation) {
+          const parent = byId.get(root.continuation.parentId)
+          if (!parent || visited.has(parent.id)) break
+          root = parent
+          visited.add(root.id)
+        }
+        this.saveSummary(run, root.id)
+      }
+      this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(version, 'true')
+    })
+  }
+
+  private migrateRunStart() {
+    const version = 'run-started-v1'
+    if (this.db.prepare('SELECT 1 FROM settings WHERE key = ?').get(version)) return
+    this.transaction(() => {
+      // A stopped task may have left the queue before it recorded an attempt.
+      this.db.exec(`
+        UPDATE runs SET json = json_set(json, '$.started', json(CASE
+          WHEN json_extract(runs.json, '$.status') NOT IN ('saved', 'stopped')
+            OR EXISTS (SELECT 1 FROM json_each(runs.json, '$.attempts') WHERE json_array_length(value) > 0)
+            OR EXISTS (SELECT 1 FROM run_events WHERE run_id = runs.id
+              AND json_extract(run_events.json, '$.kind') = 'state'
+              AND json_extract(run_events.json, '$.data.status') = 'queued')
+          THEN 'true' ELSE 'false' END))
+        WHERE json_type(json, '$.started') IS NULL
+      `)
+      this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(version, 'true')
+    })
+  }
+
+  private migrateFolderResources() {
+    const version = 'folder-resources-v1'
+    if (this.db.prepare('SELECT 1 FROM settings WHERE key = ?').get(version)) return
+    this.transaction(() => {
+      for (const resource of this.listConfig('resources')) {
+        if ((resource as { kind: string }).kind === 'folder') this.saveConfig('resources', { ...resource, kind: 'file' }, resource.id)
+      }
+      this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(version, 'true')
+    })
   }
 
   private seedBuiltinTemplates() {
@@ -214,51 +282,105 @@ export class Store {
     return this.db.prepare('SELECT sealed FROM account_secrets WHERE account_id = ?').get(id)?.sealed
   }
 
-  private storedOptimizer(): StoredOptimizer {
+  private storedExecutors(): StoredExecutors {
+    const current = this.db.prepare('SELECT value AS json FROM settings WHERE key = ?').get(executorSettingsKey)
+    if (current) return parse<StoredExecutors>(current)
     const row = this.db.prepare('SELECT value AS json FROM settings WHERE key = ?').get(optimizerKey)
-    if (!row) return { enabled: false, provider: defaultPromptOptimizer.provider, profiles: {} }
-    const saved = parse<StoredOptimizer | (PromptOptimizerConfig & { sealed?: string })>(row)
-    if ('profiles' in saved) return saved
-    const { enabled, provider, model, sealed } = saved
-    return { enabled, provider, profiles: { [provider]: { model, sealed } } }
+    if (!row) return { optimizer: defaultPromptOptimizer, profiles: {} }
+    const saved = parse<LegacyOptimizer>(row)
+    const { enabled, provider } = saved
+    const profiles = 'profiles' in saved ? saved.profiles : { [provider]: { model: saved.model, sealed: saved.sealed } }
+    return { optimizer: { enabled, executorId: modelApiId(provider) }, profiles }
+  }
+
+  private saveExecutorSettings(settings: StoredExecutors) {
+    this.db.prepare('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(executorSettingsKey, JSON.stringify(settings))
+    this.db.prepare('DELETE FROM settings WHERE key = ?').run(optimizerKey)
   }
 
   private hasSecrets() {
+    const settings = this.storedExecutors()
     return !!this.db.prepare('SELECT 1 FROM account_secrets LIMIT 1').get()
-      || Object.values(this.storedOptimizer().profiles).some(profile => !!profile.sealed)
+      || [...Object.values(settings.profiles), ...Object.values(settings.custom ?? {})].some(profile => !!profile.sealed)
+  }
+
+  private apiEntries(settings: StoredExecutors): [string, StoredApi][] {
+    const defaults = promptOptimizerProviders.flatMap(provider => {
+      const profile = settings.profiles[provider]
+      return profile ? [[modelApiId(provider), { ...profile, provider }] as [string, StoredApi]] : []
+    })
+    return [...defaults, ...Object.entries(settings.custom ?? {})]
+  }
+
+  modelApis(): ModelApiProfile[] {
+    return this.apiEntries(this.storedExecutors()).map(([id, { sealed, name, ...api }]) =>
+      ({ ...api, id, name: name || modelApiName(api), hasApiKey: !!sealed }))
+  }
+
+  getExecutor(id: string, purpose: 'execution' | 'optimization' = 'execution'): Executor | undefined {
+    if (!id.startsWith('api:')) return this.getConfig('engines', id)
+    const profile = this.modelApis().find(api => api.id === id && api.hasApiKey && supportsApiPurpose(api, purpose))
+    if (!profile) return undefined
+    const { provider, model, name } = profile
+    return { id, provider, model, name, kind: 'api', mode: 'agent' } satisfies ApiExecutor
   }
 
   promptOptimizer(): PromptOptimizerSettings {
-    const { enabled, provider, profiles } = this.storedOptimizer()
-    const publicProfiles: PromptOptimizerSettings['profiles'] = {}
-    for (const id of promptOptimizerProviders) {
-      const profile = profiles[id]
-      if (profile) publicProfiles[id] = { model: profile.model, hasApiKey: !!profile.sealed }
-    }
-    const active: PromptOptimizerProfile = publicProfiles[provider] ?? { model: optimizerProviderOptions[provider].models[0], hasApiKey: false }
-    return { enabled, provider, ...active, profiles: publicProfiles }
+    const { optimizer } = this.storedExecutors()
+    const executor = this.getExecutor(optimizer.executorId, 'optimization')
+    return { ...optimizer, enabled: optimizer.enabled && !!executor, executorName: executor?.name }
   }
 
-  savePromptOptimizer(config: PromptOptimizerConfig, apiKey: string | null | undefined) {
+  savePromptOptimizer(optimizer: PromptOptimizerSelection) {
     return this.transaction(() => {
-      const { enabled, provider, model } = config
-      const { profiles } = this.storedOptimizer()
-      const sealed = apiKey === null ? undefined : apiKey === undefined ? profiles[provider]?.sealed
-        : this.secrets.seal(apiKey, optimizerBinding(provider), !this.hasSecrets())
-      if (enabled && !sealed) throw new HttpError(400, `启用提示词优化时需保存 ${optimizerProviderOptions[provider].label} API Key`)
-      profiles[provider] = { model, sealed }
-      this.db.prepare('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-        .run(optimizerKey, JSON.stringify({ enabled, provider, profiles }))
+      if (optimizer.enabled && !this.getExecutor(optimizer.executorId, 'optimization')) throw new HttpError(400, '请选择已配置的本地引擎或厂商 API')
+      this.saveExecutorSettings({ ...this.storedExecutors(), optimizer })
       return this.promptOptimizer()
     })
   }
 
-  promptOptimizerKey(provider: PromptOptimizerProvider) {
-    const sealed = this.storedOptimizer().profiles[provider]?.sealed
-    const label = optimizerProviderOptions[provider].label
+  saveModelApi(config: ModelApiConfig & { name?: string; purpose?: ModelApiPurpose }, apiKey: string | null | undefined, id = modelApiId(config.provider)) {
+    return this.transaction(() => {
+      const settings = this.storedExecutors()
+      const previous = this.apiEntries(settings).find(([key]) => key === id)?.[1]
+      if (previous && previous.provider !== config.provider) throw new HttpError(400, '已有配置的厂商不可更改，请新建配置')
+      const { provider, ...fields } = config
+      const legacy = id === modelApiId(provider)
+      const sealed = apiKey === null ? undefined : apiKey === undefined ? previous?.sealed
+        : this.secrets.seal(apiKey, legacy ? optimizerBinding(provider) : id, !this.hasSecrets())
+      const stored = { ...previous, ...fields, provider, sealed }
+      if (legacy) settings.profiles[provider] = stored
+      else (settings.custom ??= {})[id] = stored
+      if (settings.optimizer.executorId === id && (!sealed || !supportsApiPurpose(stored, 'optimization'))) settings.optimizer.enabled = false
+      this.saveExecutorSettings(settings)
+      return this.modelApis().find(api => api.id === id)!
+    })
+  }
+
+  deleteModelApi(id: string) {
+    this.transaction(() => {
+      const settings = this.storedExecutors()
+      const entry = this.apiEntries(settings).find(([key]) => key === id)
+      if (!entry) throw new HttpError(404, '找不到厂商配置')
+      const [, profile] = entry
+      if (id === modelApiId(profile.provider)) delete settings.profiles[profile.provider]
+      else if (settings.custom) delete settings.custom[id]
+      if (settings.optimizer.executorId === id) settings.optimizer = { ...defaultPromptOptimizer }
+      this.saveExecutorSettings(settings)
+    })
+    return { ok: true }
+  }
+
+  modelApiKey(profileId: string) {
+    const id = profileId.startsWith('api:') ? profileId : modelApiId(profileId as PromptOptimizerProvider)
+    const profile = this.apiEntries(this.storedExecutors()).find(([key]) => id === key)?.[1]
+    const sealed = profile?.sealed
+    const label = profile ? optimizerProviderOptions[profile.provider].label : '所选厂商'
     if (!sealed) throw new HttpError(400, `请先保存 ${label} API Key`)
-    try { return this.secrets.open(sealed, optimizerBinding(provider)) }
-    catch { throw new HttpError(409, `无法读取保存的 ${label} API Key，请在配置中重新保存`) }
+    const binding = id === modelApiId(profile!.provider) ? optimizerBinding(profile!.provider) : id
+    try { return this.secrets.open(sealed, binding) }
+    catch { throw new HttpError(409, `无法读取保存的 ${label} API Key，请在「引擎与 API」中重新保存`) }
   }
 
   readAccountPassword(account: Account) {
@@ -279,6 +401,9 @@ export class Store {
         this.db.prepare("DELETE FROM configs WHERE kind = 'resources' AND json_extract(json, '$.iterationId') = ?").run(id)
       } else if (kind === 'accounts') {
         this.db.prepare('DELETE FROM account_secrets WHERE account_id = ?').run(id)
+      } else if (kind === 'engines') {
+        const settings = this.storedExecutors()
+        if (settings.optimizer.executorId === id) this.saveExecutorSettings({ ...settings, optimizer: defaultPromptOptimizer })
       }
       this.db.prepare('DELETE FROM configs WHERE kind = ? AND id = ?').run(kind, id)
     })
@@ -288,7 +413,7 @@ export class Store {
     return {
       projects: this.listConfig('projects'), iterations: this.listConfig('iterations'),
       resources: this.listConfig('resources'), templates: this.listConfig('templates'),
-      engines: this.listConfig('engines'), accounts: this.listConfig('accounts'),
+      engines: this.listConfig('engines'), accounts: this.listConfig('accounts'), modelApis: this.modelApis(),
     }
   }
 
@@ -297,11 +422,77 @@ export class Store {
   }
 
   summaries(): RunSummary[] {
-    return this.listRuns().map(({ id, title, taskType, status, stageIndex, createdAt, updatedAt, archivedAt, project, iteration, templateName, stages }) => ({
-      id, title, taskType, status, stageIndex, createdAt, updatedAt, archivedAt, projectId: project.id, projectName: project.name, templateName,
+    return this.db.prepare('SELECT json FROM run_summaries ORDER BY created_at DESC, rowid DESC').all().map(parse<RunSummary>)
+  }
+
+  private saveSummary({ id, title, taskType, status, stageIndex, started, createdAt, updatedAt, durationMs, archivedAt,
+    project, iteration, templateName, stages, continuation, attempts }: Run, rootId?: string) {
+    const root = rootId ?? (continuation && this.db.prepare('SELECT root_id FROM run_summaries WHERE id = ?').get(continuation.parentId)?.root_id) ?? id
+    const summary: RunSummary = {
+      id, title, taskType, status, stageIndex, started, createdAt, updatedAt, durationMs, archivedAt, projectId: project.id, projectName: project.name, templateName,
       iterationId: iteration?.id, iterationName: iteration?.name,
       stageName: stages[stageIndex]?.name ?? '', stageCount: stages.length,
-    }))
+      continuation, contextMode: continuation && attempts.flat().findLast(attempt => attempt.contextMode)?.contextMode,
+    }
+    const search = [title, project.name, iteration?.name, taskTypeLabel(taskType)].filter(Boolean).join(' ').toLowerCase()
+    this.db.prepare(`INSERT INTO run_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, project_name = excluded.project_name,
+      iteration_id = excluded.iteration_id, iteration_name = excluded.iteration_name, archived = excluded.archived,
+      status = excluded.status, updated_at = excluded.updated_at, search = excluded.search, json = excluded.json`)
+      .run(id, String(root), project.id, project.name, iteration?.id ?? '', iteration?.name ?? '', Number(!!archivedAt), status, updatedAt, createdAt, search, JSON.stringify(summary))
+  }
+
+  hasActiveRuns() {
+    return !!this.db.prepare("SELECT 1 FROM run_summaries WHERE status IN ('queued', 'running', 'waiting_input', 'waiting_approval', 'waiting_stage', 'stopping') LIMIT 1").get()
+  }
+
+  recentRuns(project: string, iteration: string | undefined, limit: number) {
+    const where = iteration ? ' AND iteration_id = ?' : ''
+    return this.db.prepare(`SELECT json FROM run_summaries WHERE archived = 0 AND project_id = ?${where} ORDER BY updated_at DESC, id DESC LIMIT ?`)
+      .all(project, ...(iteration ? [iteration] : []), limit).map(parse<RunSummary>)
+  }
+
+  relatedRuns(id: string): RunGroup | undefined {
+    const root = this.db.prepare('SELECT root_id FROM run_summaries WHERE id = ?').get(id)?.root_id
+    if (typeof root !== 'string') return undefined
+    const rows = this.db.prepare('SELECT json FROM run_summaries WHERE root_id = ? ORDER BY created_at DESC, id DESC').all(root).map(parse<RunSummary>)
+    const source = rows.find(run => run.id === root) ?? rows.at(-1)
+    return source && { source, runs: rows }
+  }
+
+  runPage(filters: HistoryFilters): RunPage {
+    const where = ['archived = ?']
+    const params: (string | number)[] = [Number(filters.archived)]
+    for (const [key, value] of [['project_id', filters.projectId], ['iteration_id', filters.iterationId === 'unassigned' ? '' : filters.iterationId], ['status', filters.status]]) {
+      if (value !== undefined) { where.push(`${key} = ?`); params.push(value) }
+    }
+    if (filters.query) {
+      where.push(`(instr(search, ?) > 0 OR EXISTS (SELECT 1 FROM configs WHERE
+        ((kind = 'projects' AND id = project_id) OR (kind = 'iterations' AND id = iteration_id))
+        AND instr(lower(json_extract(configs.json, '$.name')), ?) > 0))`)
+      params.push(filters.query.toLowerCase(), filters.query.toLowerCase())
+    }
+    const filtered = where.join(' AND ')
+    const [updated, rootId] = filters.cursor?.split('|', 2) ?? []
+    const roots = this.db.prepare(`SELECT root_id, MAX(updated_at) AS latest FROM run_summaries
+      WHERE ${filtered} GROUP BY root_id
+      ${updated && rootId ? 'HAVING (latest, root_id) < (?, ?)' : ''} ORDER BY latest DESC, root_id DESC LIMIT ?`)
+      .all(...params, ...(updated && rootId ? [updated, rootId] : []), filters.limit + 1)
+    const page = roots.slice(0, filters.limit)
+    const records = page.flatMap(({ root_id }) => {
+      const runs = this.db.prepare(`SELECT json FROM run_summaries WHERE root_id = ? AND ${filtered} ORDER BY updated_at DESC, id DESC`)
+        .all(String(root_id), ...params).map(parse<RunSummary>)
+      const row = this.db.prepare('SELECT json FROM run_summaries WHERE id = ?').get(String(root_id))
+      const source = row ? parse<RunSummary>(row) : runs[0]
+      return source && runs.length ? [{ source, runs }] : []
+    })
+    const projects = this.db.prepare('SELECT project_id AS id, MAX(project_name) AS name FROM run_summaries GROUP BY project_id').all()
+      .map(row => ({ id: String(row.id), name: String(row.name) }))
+    const iterations = this.db.prepare("SELECT iteration_id AS id, MAX(iteration_name) AS name, project_id FROM run_summaries WHERE iteration_id <> '' GROUP BY project_id, iteration_id").all()
+      .map(row => ({ id: String(row.id), name: String(row.name), projectId: String(row.project_id) }))
+    const last = page.at(-1)
+    const scopeHasRuns = !!this.db.prepare('SELECT 1 FROM run_summaries WHERE archived = ? LIMIT 1').get(Number(filters.archived))
+    return { records, projects, iterations, scopeHasRuns, next: last && roots.length > filters.limit ? `${last.latest}|${last.root_id}` : undefined }
   }
 
   getRun(id: string): Run | undefined {
@@ -309,18 +500,23 @@ export class Store {
     return row && parse<Run>(row)
   }
 
-  saveRun(run: Run, contextChanged = false) {
+  saveRun(run: Run, contextChanged = false, taskChanged = false) {
     run.updatedAt = new Date().toISOString()
     run.revision = (run.revision ?? 0) + 1
-    const { status, stageIndex, attempts, pending, updatedAt, archivedAt, error, approvalMode, revision } = run
-    const state: RunState = { status, stageIndex, attempts, pending, updatedAt, archivedAt: archivedAt ?? null, error: error ?? null, approvalMode, revision }
+    const { status, stageIndex, attempts, pending, started, updatedAt, archivedAt, error, approvalMode, revision, durationMs } = run
+    const state: RunState = { status, stageIndex, attempts, pending, started, updatedAt, archivedAt: archivedAt ?? null, error: error ?? null, approvalMode, revision, durationMs }
     if (contextChanged) {
-      const { project, iteration, resources, stages, accounts } = run
-      state.context = { project, iteration, resources, stages, accounts }
+      const { project, iteration, resources, stages, accounts, savedContext } = run
+      state.context = { project, iteration, resources, stages, accounts, savedContext }
+    }
+    if (taskChanged) {
+      const { title, goal, brief, details, taskType, apiFiles, apiExcluded } = run
+      state.task = { title, goal, brief, details, taskType, apiFiles, apiExcluded }
     }
     const event = this.transaction(() => {
       this.db.prepare('INSERT INTO runs VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json')
         .run(run.id, run.createdAt, JSON.stringify(run))
+      this.saveSummary(run)
       return this.insertEvent(run, 'state', '执行状态', state)
     })
     this.events.emit(run.id, event)

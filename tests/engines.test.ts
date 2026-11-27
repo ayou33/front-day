@@ -49,16 +49,21 @@ test('Cursor 和 Codex 的原生审批、提问、补充轮次与中断', async 
       await app.api(`/runs/${run.id}/stop`, 'POST', {})
       const stopped = await waitForRun(app.api, run.id, 'stopped')
       assert.equal(stopped.attempts[1][0].status, 'stopped')
-      const response = await fetch(`${app.baseUrl}/api/runs/${run.id}/events?after=0`)
+      const response = await fetch(`${app.baseUrl}/api/runs/${run.id}/events?after=0`, { signal: AbortSignal.timeout(15_000) })
       const reader = response.body!.getReader()
       let events = ''
       const decoder = new TextDecoder()
-      while (!events.includes('"status":"stopped"')) {
-        const next = await reader.read()
-        if (next.done) break
-        events += decoder.decode(next.value, { stream: true })
+      const expectedStop = provider === 'cursor' ? '"stopReason":"cancelled"' : '"status":"interrupted"'
+      try {
+        while (!events.includes('"status":"stopped"') || !events.includes(expectedStop)) {
+          const next = await reader.read()
+          if (next.done) break
+          events += decoder.decode(next.value, { stream: true })
+        }
+      } catch (error) {
+        if ((error as Error).name !== 'TimeoutError') throw error
       }
-      await reader.cancel()
+      await reader.cancel().catch(() => {})
       assert.match(events, /id: \d+/)
       assert.match(events, provider === 'cursor' ? /session\/update/ : /item\/commandExecution\/outputDelta/)
       assert.match(events, provider === 'cursor' ? /"stopReason":"cancelled"/ : /"status":"interrupted"/)
@@ -139,4 +144,47 @@ test('工作台重启后，Codex 检查和项目任务沿用同一个本机配�
   const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, goal: '验证项目任务沿用配置', engineId: engine.id })
   const done = await waitForRun(app.api, run.id, 'succeeded')
   assert.equal(done.attempts[0][0].sessionId, 'codex-session')
+})
+
+test('项目连接检查使用项目目录和引擎公布的配置，Codex 项目探测使用临时线程', async t => {
+  const h = await harness()
+  const app = await serve(h.dir, { FRONT_DAY_FIXTURE_PROJECT_CWD: h.project, FRONT_DAY_FIXTURE_MODE: 'readonly-custom',
+    FRONT_DAY_FIXTURE_PROBE_ONLY: '1', CODEX_HOME: h.dir })
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const project = await app.api<Project>('/config/projects', 'POST', { name: '引擎检查项目', directory: h.project })
+  const engine = { name: 'Claude 测试', provider: 'claude', executable: h.wrappers.claude, model: 'fixture-model', mode: 'ask' }
+  await app.api('/config/engines/claude-default', 'PUT', engine)
+  const path = `/engines/claude-default/health?projectId=${project.id}`
+  const health = await app.api<EngineHealth>(path)
+  assert.equal(health.projectId, project.id)
+  assert.equal(health.workingDirectory, h.project)
+  assert.equal(health.sessionReady, true, health.message)
+  assert.equal((await app.api<Catalog>('/catalog')).engineAvailability?.find(item => item.id === 'claude-default')?.health, undefined)
+  const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: 'claude-default', goal: '核对项目能力' })
+  assert.match((await waitForRun(app.api, run.id, 'succeeded')).attempts[0][0].output ?? '', /readonly-custom/)
+
+  await app.api('/config/engines/claude-default', 'PUT', { ...engine, model: 'unsupported-fixture-model' })
+  const failed = await app.api<EngineHealth>(path)
+  assert.equal(failed.connected, true)
+  assert.equal(failed.sessionReady, false)
+  assert.match(failed.message ?? '', /无法设置模型/)
+  await assert.rejects(() => app.api('/engines/claude-default/health?projectId=missing'), /找不到所选项目/)
+  await app.api('/config/engines/codex-default', 'PUT', { ...engine, provider: 'codex', executable: h.wrappers.codex })
+  const codex = await app.api<EngineHealth>(`/engines/codex-default/health?projectId=${project.id}`)
+  assert.equal(codex.auth, 'ready')
+  assert.equal(codex.sessionReady, true, codex.message)
+})
+
+test('ACP 引擎撤回授权后，工作台清理待处理请求', async t => {
+  const h = await harness()
+  const app = await serve(h.dir)
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const project = await app.api<Project>('/config/projects', 'POST', { name: '授权撤回', directory: h.project })
+  await app.api('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
+  const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: 'cursor-default', goal: 'CANCEL_APPROVAL' })
+  const waiting = await waitForRun(app.api, run.id, 'waiting_approval')
+  const stopped = await waitForRun(app.api, run.id, 'failed')
+  assert.match(stopped.error ?? '', /cancelled/)
+  assert.deepEqual(stopped.pending, [])
+  await assert.rejects(() => app.api(`/runs/${run.id}/interactions/${encodeURIComponent(waiting.pending[0].id)}`, 'POST', { choice: 'allow-once' }), /过期/)
 })

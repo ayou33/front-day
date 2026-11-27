@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ArrowDown, ArrowRight, ArrowUp, Braces, FlaskConical, GitFork, Plus, Trash2 } from 'lucide-react'
 import type { Stage, Template } from '../../shared/contracts.ts'
-import { Check, CommandFields, Empty, EngineOptions, Field, SectionHeading } from '../ui.tsx'
+import { Check, CommandFields, Empty, ExecutorOptions, Field, SectionHeading } from '../ui.tsx'
 import { Editor, ItemActions, blankStage, commandOrNull, modes, remove } from './common.tsx'
 import type { Props } from './common.tsx'
 
@@ -35,7 +35,8 @@ export function TemplatesView({ catalog, refresh }: Props) {
       {!catalog.templates.length && <section className="panel"><Empty icon={GitFork} title="还没有流水线模板" action={<button className="button" onClick={create}>新建模板</button>} /></section>}
     </div>
     {edit && <Editor kind="templates" value={edit} close={() => setEdit(null)} refresh={refresh} title={edit.id ? '编辑流水线模板' : '新建流水线模板'} wide
-      prepare={() => ({ ...edit, stages: edit.stages.map(stage => ({ ...stage, testCommand: stage.kind === 'test' ? commandOrNull(stage.testCommand) : null })) })}>
+      prepare={() => ({ ...edit, stages: edit.stages.map(stage => ({ ...stage, testCommand: stage.kind === 'test' || stage.acceptance === 'test' ? commandOrNull(stage.testCommand) : null,
+        acceptance: stage.kind === 'agent' ? stage.acceptance : undefined })) })}>
       <Field label="模板名称"><input required value={edit.name} onChange={event => setEdit({ ...edit, name: event.target.value })} /></Field>
       <Field label="模板说明"><input value={edit.description} onChange={event => setEdit({ ...edit, description: event.target.value })} /></Field>
       {edit.stages.map((stage, index) => <fieldset className="stage-editor" key={index}>
@@ -49,9 +50,15 @@ export function TemplatesView({ catalog, refresh }: Props) {
           <Field label="类型"><select value={stage.kind} onChange={event => changeStage(index, { kind: event.target.value as Stage['kind'] })}><option value="agent">Agent</option><option value="test">测试命令</option></select></Field></div>
         {stage.kind === 'test' && <><CommandFields value={stage.testCommand} onChange={testCommand => changeStage(index, { testCommand })} />
           <p className="caption">留空时使用项目的测试命令。</p><Check checked={stage.analyzeTest} onChange={analyzeTest => changeStage(index, { analyzeTest })}>由 Agent 以只读模式解读测试日志</Check></>}
+        {stage.kind === 'agent' && <Field label="阶段验收"><select value={stage.acceptance ?? ''} onChange={event => changeStage(index,
+          { acceptance: (event.target.value || undefined) as Stage['acceptance'] })}>
+          <option value="">手动验收</option><option value="changes">验证文件改动</option><option value="test">运行测试命令</option>
+        </select></Field>}
+        {stage.kind === 'agent' && stage.acceptance === 'test' && <><CommandFields value={stage.testCommand}
+          onChange={testCommand => changeStage(index, { testCommand })} /><p className="caption">留空时使用项目的测试命令。</p></>}
         {(stage.kind === 'agent' || stage.analyzeTest) && <>
-          <div className="form-columns"><Field label="Agent 配置"><select value={stage.engineId} onChange={event => changeStage(index, { engineId: event.target.value })}>
-            <option value="">沿用派发设置</option><EngineOptions engines={catalog.engines} availability={catalog.engineAvailability} />
+          <div className="form-columns"><Field label="执行器"><select value={stage.engineId} onChange={event => changeStage(index, { engineId: event.target.value })}>
+            <option value="">沿用派发设置</option><ExecutorOptions catalog={catalog} />
           </select></Field>{stage.kind === 'agent' && <Field label="运行模式"><select value={stage.mode} onChange={event => changeStage(index, { mode: event.target.value as Stage['mode'] })}>
             <option value="">沿用引擎设置</option>{Object.entries(modes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></Field>}</div>

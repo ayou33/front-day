@@ -12,6 +12,7 @@
 .run-detail { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .run-detail > .back-button { align-self: flex-start; }
 .run-detail > .error-line { margin-bottom: 10px; }
+.run-detail > .event-item { margin-bottom: 12px; }
 
 .run-back { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
 .run-back .back-button { margin: 0; }
@@ -38,6 +39,7 @@
   border-radius: 12px;
 }
 .run-status-bar.status--queued { --st-soft: var(--surface-2); --st-ink: var(--muted); --st-line: var(--line); }
+.run-status-bar.status--saved { --st-soft: var(--brand-tint); --st-ink: var(--brand-ink); --st-line: var(--brand-tint-2); }
 .run-status-bar.status--running, .run-status-bar.status--stopping { --st-soft: var(--info-soft); --st-ink: var(--info); --st-line: var(--info-line); }
 .run-status-bar.status--succeeded { --st-soft: var(--ok-soft); --st-ink: var(--ok); --st-line: var(--ok-line); }
 .run-status-bar.status--waiting_approval, .run-status-bar.status--waiting_input, .run-status-bar.status--waiting_stage { --st-soft: var(--warn-soft); --st-ink: var(--warn); --st-line: var(--warn-line); }
@@ -100,9 +102,9 @@
 .event-panel > :not(.output-viewport) { flex-shrink: 0; }
 .event-panel .panel-header { padding: 14px 16px 12px; border-bottom: 1px solid var(--line-soft); }
 
-.tabs { display: flex; gap: 2px; padding: 0 12px; background: var(--surface-2); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.run-toolbar { display: flex; align-items: stretch; min-width: 0; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.tabs { display: flex; flex: 1; gap: 2px; min-width: 0; padding: 0 12px; overflow-x: auto; scrollbar-width: none; }
 .tabs button {
-  margin-bottom: -1px;
   padding: 10px 11px;
   color: var(--muted);
   font-size: 12.5px;
@@ -116,14 +118,15 @@
 .tabs button:hover { color: var(--ink-2); }
 .tabs button.active { color: var(--brand-ink); font-weight: 650; border-bottom-color: var(--brand-500); }
 
-.output-navigation { display: flex; justify-content: flex-end; gap: 6px; padding: 5px 12px; border-bottom: 1px solid var(--line-soft); }
+.output-navigation { display: flex; flex: none; align-items: center; gap: 2px; padding: 0 8px; border-left: 1px solid var(--line-soft); }
 .output-navigation button {
   display: inline-flex;
+  justify-content: center;
   align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   color: var(--muted);
-  font-size: 11.5px;
   background: transparent;
   border: 0;
   border-radius: var(--radius-xs);
@@ -138,6 +141,8 @@
 .run-context { display: grid; gap: 12px; padding: 16px; }
 .run-context .project-facts { padding: 0; }
 .run-context a { text-decoration: none; }
+.run-continuations { display: grid; gap: 8px; padding: 4px 16px 12px 34px; }
+.run-continuations li > .caption { display: block; }
 .attempt-error { margin: 14px 16px 0; }
 
 .gate {
@@ -238,6 +243,7 @@
 .event-item summary small { color: var(--muted-2); }
 .event-item summary::after { content: '+'; margin-left: auto; color: var(--muted-2); }
 .event-item[open] summary::after { content: '−'; }
+.agent-prompt-preview > summary { padding-block: 4px; }
 .event-item pre {
   max-height: 400px;
   padding: 10px 12px;
@@ -263,3 +269,15 @@
   background: var(--console-bg);
 }
 .event-item .console { border-top: 1px solid rgba(255, 255, 255, .06); }
+.acceptance-note { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.acceptance-note .row-link { white-space: nowrap; }
+.approval-diff { max-height: 200px; overflow: auto; white-space: pre-wrap; }
+.run-file-changes { display: grid; gap: 8px; }
+.file-change-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; }
+.run-file-changes ul { margin: 0; padding: 0; list-style: none; }
+.run-file-changes li { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 10px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line-soft); }
+.run-file-changes code { color: var(--ink-2); overflow-wrap: anywhere; }
+.file-change-kind { font-size: 12px; font-weight: 600; color: var(--muted); }
+.file-change-kind.added { color: var(--ok); }
+.file-change-kind.modified { color: var(--info); }
+.file-change-kind.deleted { color: var(--danger); }

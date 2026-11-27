@@ -5,6 +5,7 @@ import type { ApprovalMode } from '../../shared/engines.ts'
 import type { Engine, EngineAvailability, EngineHealth } from '../../shared/contracts.ts'
 import { request } from '../api.ts'
 import { ApprovalOptions, Empty, ExternalLink, Field, SectionHeading, engineChoices, message } from '../ui.tsx'
+import { ModelApisPanel } from './ModelApisPanel.tsx'
 import { Editor, ItemActions, blankEngine, modes, remove } from './common.tsx'
 import type { Props } from './common.tsx'
 
@@ -24,6 +25,7 @@ function engineStatus(check: EngineCheck | undefined): keyof typeof engineStatus
   if (!check.installed) return 'missing'
   if (!check.connected) return 'disconnected'
   if (check.auth === 'required') return 'login'
+  if (check.projectId && check.sessionReady === false) return 'error'
   return check.auth === 'ready' ? 'ready' : 'unknown'
 }
 
@@ -65,8 +67,8 @@ function CursorModelField({ model, onChange }: { model: string; onChange: (model
   </>
 }
 
-function EngineRow({ engine, local, refresh, onEdit, onDelete }: {
-  engine: Engine; local?: EngineAvailability; refresh: () => Promise<void>; onEdit: () => void; onDelete: () => Promise<void>
+function EngineRow({ engine, local, projectId, refresh, onEdit, onDelete }: {
+  engine: Engine; local?: EngineAvailability; projectId: string; refresh: () => Promise<void>; onEdit: () => void; onDelete: () => Promise<void>
 }) {
   const [latest, setLatest] = useState<EngineCheck>()
   const [expanded, setExpanded] = useState(false)
@@ -74,16 +76,17 @@ function EngineRow({ engine, local, refresh, onEdit, onDelete }: {
   async function inspect() {
     setLatest('loading')
     try {
-      const result = await request<EngineHealth>(`/engines/${engine.id}/health`)
+      const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+      const result = await request<EngineHealth>(`/engines/${engine.id}/health${query}`)
       setLatest(result)
       if (!result.installed || result.auth === 'required') setExpanded(true)
-      void refresh().catch(() => {})
+      if (!projectId) void refresh().catch(() => {})
     } catch (error) {
       setLatest({ error: message(error) })
     }
   }
 
-  const check = latest ?? local?.health
+  const check = latest ?? (projectId ? undefined : local?.health)
   const status = !check && local?.executable === null ? 'missing' : engineStatus(check)
   const { icon: Icon, label } = engineStatuses[status]
   const health = check && check !== 'loading' && 'installed' in check ? check : undefined
@@ -96,6 +99,8 @@ function EngineRow({ engine, local, refresh, onEdit, onDelete }: {
     { name: '协议', label: health.connected ? '已连接' : health.installed ? '连接失败' : '待检查', tone: health.connected ? 'ready' : health.installed ? 'disconnected' : 'idle' },
     { name: '认证', label: health.auth === 'ready' ? '已认证' : health.auth === 'required' ? '需要登录' : health.connected ? '待确认' : '待检查',
       tone: health.auth === 'ready' ? 'ready' : health.auth === 'required' ? 'login' : health.connected ? 'unknown' : 'idle' },
+    ...(health.projectId ? [{ name: '项目会话', label: health.sessionReady ? '配置已应用' : health.sessionReady === false ? '检查失败' : '待检查',
+      tone: health.sessionReady ? 'ready' : health.sessionReady === false ? 'error' : 'idle' }] : []),
   ]
   const note = check && check !== 'loading' && 'error' in check ? check.error : health?.message
   return <article className="settings-row" aria-label={engine.name}>
@@ -113,6 +118,7 @@ function EngineRow({ engine, local, refresh, onEdit, onDelete }: {
         <dt>{item.name}</dt><dd>{item.label}</dd>
       </div>)}</dl>}
       {note && <p className={`engine-note engine-tone-${status}`}>{note}</p>}
+      {health?.workingDirectory && <p className="mono path" title={health.workingDirectory}>{health.workingDirectory}</p>}
       {executable && <p className="mono path">{[health?.version, executable].filter(Boolean).join(' · ')}</p>}
       <details className="engine-guide" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
         <summary>连接指引</summary>
@@ -130,15 +136,22 @@ function EngineRow({ engine, local, refresh, onEdit, onDelete }: {
 
 export function EnginesView({ catalog, refresh }: Props) {
   const [engineEdit, setEngineEdit] = useState<Engine | null>(null)
+  const [selectedProject, setSelectedProject] = useState('')
+  const projectId = catalog.projects.some(project => project.id === selectedProject) ? selectedProject : ''
   const editingGuide = engineEdit && engineGuides[engineEdit.provider]
   const choices = engineChoices(catalog.engines, catalog.engineAvailability)
   const missing = choices.filter(({ local }) => local?.executable === null)
-  const engineRow = ({ engine, local }: (typeof choices)[number]) => <EngineRow engine={engine} local={local} refresh={refresh}
-    key={JSON.stringify([engine, local?.executable])} onEdit={() => setEngineEdit(engine)} onDelete={() => remove('engines', engine.id, refresh)} />
+  const engineRow = ({ engine, local }: (typeof choices)[number]) => <EngineRow engine={engine} local={local} projectId={projectId} refresh={refresh}
+    key={JSON.stringify([engine, local?.executable, projectId])} onEdit={() => setEngineEdit(engine)} onDelete={() => remove('engines', engine.id, refresh)} />
   return <>
-    <SectionHeading title="引擎" description="配置本地 Agent CLI、运行模式与授权方式。" />
+    <SectionHeading title="引擎与 API" description="配置本地 Agent、厂商 API 和任务授权。" />
     <div className="stack">
       <section className="panel"><div className="panel-header"><div className="icon-heading"><div className="section-icon"><Cable size={20} /></div><div><h2>本地 Agent</h2><p>已就绪和已安装的引擎优先显示。点击「检查连接」查看 CLI、协议和认证状态。</p></div></div><button className="button" onClick={() => setEngineEdit(blankEngine)}><Plus size={16} />添加配置</button></div>
+        {!!catalog.projects.length && <div className="preference-fields"><Field label="连接检查目录" detail="选择项目后，会在其工作目录验证会话启动、模型和运行模式。">
+          <select value={projectId} onChange={event => setSelectedProject(event.target.value)}>
+            <option value="">工作台目录</option>{catalog.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </Field></div>}
         {choices.filter(({ local }) => local?.executable !== null).map(engineRow)}
         {missing.length > 0 && <details className="missing-engines">
           <summary>未找到 CLI 的引擎 <span className="chip">{missing.length}</span></summary>
@@ -146,6 +159,7 @@ export function EnginesView({ catalog, refresh }: Props) {
         </details>}
         {!catalog.engines.length && <Empty icon={Cable} title="暂无 Agent 配置" />}
       </section>
+      <ModelApisPanel profiles={catalog.modelApis ?? []} refresh={refresh} />
     </div>
     {engineEdit && editingGuide && <Editor kind="engines" value={engineEdit} close={() => setEngineEdit(null)} refresh={refresh} title={engineEdit.id ? '编辑 Agent 配置' : '添加 Agent 配置'}>
       <Field label="配置名称"><input required value={engineEdit.name} onChange={event => setEngineEdit({ ...engineEdit, name: event.target.value })} /></Field>

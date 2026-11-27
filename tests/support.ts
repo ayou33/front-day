@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Config, Provider, Run, RunStatus } from '../shared/contracts.ts'
 import { engineGuides, engineProviders } from '../shared/engines.ts'
@@ -10,7 +10,7 @@ import { engineGuides, engineProviders } from '../shared/engines.ts'
 export const root = fileURLToPath(new URL('../', import.meta.url))
 
 export async function harness() {
-  const dir = await mkdtemp(join(tmpdir(), 'front day test-'))
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'front day test-'))
   const project = join(dir, 'test project')
   await mkdir(project)
   const fixture = fileURLToPath(new URL('./fixtures/agent.ts', import.meta.url))
@@ -27,8 +27,10 @@ export async function harness() {
   return { dir, project, wrappers, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5 }) }
 }
 
-export async function serve(dir: string, env: NodeJS.ProcessEnv = {}) {
-  const child = spawn(process.execPath, ['server/index.ts'], { cwd: root, env: { ...process.env, ...env, FRONT_DAY_PORT: '0', FRONT_DAY_DATA_DIR: join(dir, 'data'),
+export async function serve(dir: string, env: NodeJS.ProcessEnv = {}, preload?: URL) {
+  const args = [...preload ? ['--import', preload.href] : [], 'server/index.ts']
+  const child = spawn(process.execPath, args, { cwd: root, env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+    CLAUDE_CODE_EXECUTABLE: join(dir, 'missing-claude-cli'), ...env, FRONT_DAY_PORT: '0', FRONT_DAY_DATA_DIR: join(dir, 'data'),
     FRONT_DAY_PREFERENCES_FILE: join(dir, '.front-day.preferences.json') }, stdio: 'pipe', windowsHide: true })
   let stdout = ''
   let stderr = ''

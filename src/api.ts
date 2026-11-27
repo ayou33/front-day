@@ -1,4 +1,4 @@
-import type { ConfigKind, Entity, Run } from '../shared/contracts.ts'
+import type { ConfigKind, Entity, RunRecord } from '../shared/contracts.ts'
 
 export async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -14,5 +14,5 @@ export function saveConfig<K extends ConfigKind>(kind: K, value: Entity<K>) {
 }
 
 export function runAction(id: string, action: string, body: unknown = {}) {
-  return request<Run>(`/runs/${encodeURIComponent(id)}/${action}`, 'POST', body)
+  return request<RunRecord>(`/runs/${encodeURIComponent(id)}/${action}`, 'POST', body)
 }

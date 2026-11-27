@@ -84,13 +84,14 @@ export function withinDirectory(root: string, file: string) {
   return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
 }
 
-export async function resourceFilePath(value: string, directory: string) {
+export async function localPath(value: string, directory: string) {
   const absolute = isAbsolute(value)
-  const file = await realpath(absolute ? value : resolve(directory, value)).catch(() => undefined)
-  if (!file || (!absolute && !withinDirectory(directory, file)) || !(await stat(file).catch(() => undefined))?.isFile()) {
-    throw new HttpError(400, '无法读取所选本地文件')
+  const target = await realpath(absolute ? value : resolve(directory, value)).catch(() => undefined)
+  const stats = target ? await stat(target).catch(() => undefined) : undefined
+  if (!target || (!absolute && !withinDirectory(directory, target)) || !(stats?.isFile() || stats?.isDirectory())) {
+    throw new HttpError(400, '无法读取所选本地文件或文件夹')
   }
-  return withinDirectory(directory, file) ? relative(directory, file) : file
+  return { path: withinDirectory(directory, target) ? relative(directory, target) : target, folder: !!stats?.isDirectory() }
 }
 
 export async function resolveResource(resource: Resource, accounts: Account[], directory: string, signal: AbortSignal, readPassword: ReadPassword) {
@@ -100,8 +101,11 @@ export async function resolveResource(resource: Resource, accounts: Account[], d
     let source = '文本'
     let accountUsage = ''
     if (resource.kind === 'file') {
-      content = await resourceFilePath(resource.value, directory)
-      source = isAbsolute(content) ? '本机文件绝对路径，请读取此文件作为参考' : '项目文件相对路径，请读取该文件'
+      const local = await localPath(resource.value, directory)
+      content = local.path
+      source = local.folder
+        ? (isAbsolute(content) ? '本机文件夹绝对路径，请读取该目录中的文件作为参考' : '项目文件夹相对路径，请读取该目录中的文件')
+        : (isAbsolute(content) ? '本机文件绝对路径，请读取此文件作为参考' : '项目文件相对路径，请读取该文件')
     }
     if (resource.kind === 'url') {
       const url = webUrl(resource.value)

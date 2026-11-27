@@ -15,12 +15,19 @@ export const optimizerProviderOptions: Record<PromptOptimizerProvider, { label: 
   minimax: { label: 'MiniMax', models: ['MiniMax-M3.1-Flash', 'MiniMax-M3'], detail: '使用 MiniMax 中国站 API Key。' },
 }
 
-export type PromptOptimizerConfig = { enabled: boolean; provider: PromptOptimizerProvider; model: string }
-export type PromptOptimizerProfile = { model: string; hasApiKey: boolean }
-export type PromptOptimizerSettings = PromptOptimizerConfig & PromptOptimizerProfile & {
-  profiles: Partial<Record<PromptOptimizerProvider, PromptOptimizerProfile>>
-}
-export const defaultPromptOptimizer: PromptOptimizerSettings = {
-  enabled: false, provider: 'deepseek', model: optimizerProviderOptions.deepseek.models[0], hasApiKey: false, profiles: {},
-}
+export type ModelApiConfig = { provider: PromptOptimizerProvider; model: string }
+export const modelApiPurposes = ['both', 'execution', 'optimization'] as const
+export type ModelApiPurpose = (typeof modelApiPurposes)[number]
+export type ModelApiProfile = ModelApiConfig & { id: string; name: string; purpose?: ModelApiPurpose; hasApiKey: boolean }
+export type ModelApiHealth = { status: 'ready' | 'key' | 'model' | 'quota' | 'network' | 'service'; message: string; elapsedMs: number }
+export const supportsApiPurpose = (api: { purpose?: ModelApiPurpose }, purpose: 'execution' | 'optimization') =>
+  !api.purpose || api.purpose === 'both' || api.purpose === purpose
+export const modelApiId = (provider: PromptOptimizerProvider) => `api:${provider}`
+export const modelApiName = ({ provider, model }: ModelApiConfig) => `${optimizerProviderOptions[provider].label} · ${model}`
+
+export type PromptOptimizerSelection = { enabled: boolean; executorId: string }
+export type PromptOptimizerSettings = PromptOptimizerSelection & { executorName?: string }
+export const defaultPromptOptimizer: PromptOptimizerSettings = { enabled: false, executorId: '' }
 export const maxOptimizationInput = 12_000
+export const apiTaskLimits = { rounds: 16, inputChars: 280_000, tokens: 120_000, fileBytes: 2_000_000,
+  readBytes: 16_000, writeBytes: 40_000, patchBytes: 8_000, outputTokens: 8000 } as const

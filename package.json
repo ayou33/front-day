@@ -12,6 +12,7 @@
     "test:browser": "node --test tests/browser.spec.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "2.12.0",
     "cross-spawn": "^7.0.6",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",

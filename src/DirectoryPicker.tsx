@@ -4,8 +4,8 @@ import type { DirectoryBrowser } from '../shared/contracts.ts'
 import { request } from './api.ts'
 import { Dialog, ErrorLine, message } from './ui.tsx'
 
-export function DirectoryPicker({ initial, close, select, title = '选择项目目录', fileMode = false, projectDirectory }: {
-  initial: string; close: () => void; select: (path: string) => void; title?: string; fileMode?: boolean; projectDirectory?: string
+export function DirectoryPicker({ initial, close, select, title = '选择项目目录', fileMode = false, allowFolder = false, projectDirectory }: {
+  initial: string; close: () => void; select: (path: string) => void; title?: string; fileMode?: boolean; allowFolder?: boolean; projectDirectory?: string
 }) {
   const [view, setView] = useState<DirectoryBrowser>()
   const [address, setAddress] = useState(initial)
@@ -61,10 +61,11 @@ export function DirectoryPicker({ initial, close, select, title = '选择项目�
             {entry.kind === 'file' ? <File size={17} /> : view.kind === 'locations' ? <HardDrive size={17} /> : <Folder size={17} />}
             <span>{entry.name}{view.kind === 'locations' && entry.name !== entry.path && <small className="mono">{entry.path}</small>}</span>
             {entry.path === selectedFile ? <Check size={15} /> : entry.kind === 'directory' ? <ChevronRight size={15} /> : null}
-          </button>) : view && <p className="caption">{directory ? fileMode ? '这个目录没有可选文件。' : '这个目录没有子文件夹。' : '暂无可浏览的位置。'}</p>}
+          </button>) : view && <p className="caption">{fileMode && directory ? '这个目录没有可选文件，可进入子文件夹后使用当前文件夹。' : '这个目录没有子文件夹。'}</p>}
       </div>
     </div>
     <div className="dialog-footer"><button type="button" className="button" onClick={close}>取消</button>
+      {fileMode && allowFolder && directory && <button type="button" className="button" disabled={busy} onClick={() => select(directory.path)}>使用此文件夹</button>}
       <button type="button" className="button primary" disabled={busy || !selected} onClick={() => { if (selected) select(selected) }}>{fileMode ? '使用此文件' : '使用此目录'}</button></div>
   </Dialog>
 }

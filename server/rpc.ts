@@ -10,7 +10,16 @@ export function object(value: unknown): JsonObject {
 export function array(value: unknown): unknown[] { return Array.isArray(value) ? value : [] }
 export function string(value: unknown): string { return typeof value === 'string' ? value : '' }
 
-type Receiver = (method: string, params: JsonObject, id?: RpcId) => void
+export type Receiver = (method: string, params: JsonObject, id?: RpcId) => void
+
+export interface EngineRpc {
+  readonly done: Promise<TestResult>
+  call(method: string, params?: JsonObject, deadline?: number): Promise<JsonObject>
+  notify(method: string, params?: JsonObject): void | Promise<void>
+  reply(id: RpcId, result: JsonObject): void
+  unsupported(id: RpcId): void
+  close(): Promise<TestResult>
+}
 
 export class RpcError extends Error {
   readonly code: unknown
@@ -20,18 +29,16 @@ export class RpcError extends Error {
   }
 }
 
-export class StdioRpc {
+export class StdioRpc implements EngineRpc {
   private child: CommandProcess
   private buffer = ''
   private nextId = 1
   private pending = new Map<number, { resolve: (result: JsonObject) => void; reject: (error: Error) => void }>()
   private stopped = false
-  private versioned: boolean
   private receive: Receiver
   readonly done: Promise<TestResult>
 
-  constructor(launch: Launch, versioned: boolean, receive: Receiver, log: (text: string) => void) {
-    this.versioned = versioned
+  constructor(launch: Launch, receive: Receiver, log: (text: string) => void) {
     this.receive = receive
     this.child = new CommandProcess(launch, (stream, text) => {
       if (stream === 'stderr') log(text)
@@ -82,8 +89,7 @@ export class StdioRpc {
 
   private send(message: JsonObject) {
     if (this.stopped) throw new Error('Agent 连接已经关闭')
-    const envelope = this.versioned ? { jsonrpc: '2.0', ...message } : message
-    this.child.write(`${JSON.stringify(envelope)}\n`)
+    this.child.write(`${JSON.stringify(message)}\n`)
   }
 
   async call(method: string, params: JsonObject = {}, deadline = 15_000): Promise<JsonObject> {

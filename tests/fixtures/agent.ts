@@ -1,23 +1,27 @@
 import { createInterface } from 'node:readline'
+import { unlinkSync, writeFileSync } from 'node:fs'
+import { relative } from 'node:path'
 import { engineGuides } from '../../shared/engines.ts'
 import type { Provider } from '../../shared/engines.ts'
 
 const [provider, command, ...args] = process.argv.slice(2) as [Provider, string | undefined, ...string[]]
-if (command === '--version') { console.log(`fixture-${provider} 1.0`); process.exit(0) }
-if (command === 'status') {
-  const value = process.env.FRONT_DAY_FIXTURE_CURSOR_AUTH
-  if (value === 'signed-out') { console.log('Not logged in'); process.exit(0) }
-  if (value === 'mixed') console.error('For more help, see authentication required when there is no saved session')
-  console.log('Logged in')
-  process.exit(0)
-}
-if (provider === 'opencode' && command === 'auth' && args[0] === 'list') {
-  console.log('1 credential')
-  process.exit(0)
+function terminalCommand() {
+  if (command === '--version') { console.log(`fixture-${provider} 1.0`); return true }
+  if (command === 'status') {
+    const value = process.env.FRONT_DAY_FIXTURE_CURSOR_AUTH
+    if (value === 'mixed') console.error('For more help, see authentication required when there is no saved session')
+    console.log(value === 'signed-out' ? 'Not logged in' : 'Logged in')
+    return true
+  }
+  if (provider === 'opencode' && command === 'auth' && args[0] === 'list') {
+    console.log('1 credential')
+    return true
+  }
+  if (JSON.stringify([command, ...args].filter(Boolean)) === JSON.stringify(engineGuides[provider].args)) return false
+  process.exitCode = 2
+  return true
 }
 const acp = provider !== 'codex'
-const actualArgs = [command, ...args].filter(Boolean)
-if (JSON.stringify(actualArgs) !== JSON.stringify(engineGuides[provider].args)) process.exit(2)
 const cursor = provider === 'cursor'
 let sessionId = `${provider}-session`
 let turn = 0
@@ -32,6 +36,11 @@ function complete() {
   if (!current) return
   const { request, prompt, id, cancelled } = current
   current = undefined
+  if (!cancelled && prompt.includes('FIXTURE_FILE_CHANGES')) {
+    writeFileSync('added.ts', 'export const added = true\n')
+    writeFileSync('modified.ts', 'export const value = 2\n')
+    unlinkSync('removed.ts')
+  }
   const handoff = prompt.includes('CONTINUATION_SUMMARY') ? '\n<front-day-handoff>{"changes":"表单保存完成","constraints":"沿用旧接口","files":"src/form.ts","verification":"表单用例通过"}</front-day-handoff>' : ''
   if (acp) {
     if (!cancelled) {
@@ -54,7 +63,7 @@ function complete() {
   }
 }
 
-createInterface({ input: process.stdin }).on('line', line => {
+if (!terminalCommand()) createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line)
   const { method, id, params } = message
   if (!method && current) {
@@ -77,6 +86,11 @@ createInterface({ input: process.stdin }).on('line', line => {
     result(id, process.env.FRONT_DAY_FIXTURE_CODEX_AUTH === 'unknown' ? { account: null } : { requiresOpenaiAuth: true, account })
   }
   if (method === 'session/new' || method === 'session/load') {
+    const projectMarker = process.env.FRONT_DAY_FIXTURE_PROJECT_CWD
+    if (projectMarker && (relative(projectMarker, process.cwd()) || relative(projectMarker, params.cwd))) {
+      send({ id, error: { code: -32602, message: 'Unexpected project workspace' } })
+      return
+    }
     if (provider === 'copilot' && process.env.FRONT_DAY_FIXTURE_COPILOT_AUTH === 'signed-out') {
       send({ id, error: { code: -32000, message: 'Authentication required' } })
     } else {
@@ -85,14 +99,23 @@ createInterface({ input: process.stdin }).on('line', line => {
         sessionId = params.sessionId
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '旧会话回放标记' } })
       }
-      result(id, { ...(method === 'session/new' && { sessionId }), configOptions: [{ id: 'mode', category: 'mode' }, {
+      const supportedMode = process.env.FRONT_DAY_FIXTURE_MODE
+      result(id, { ...(method === 'session/new' && { sessionId }), configOptions: [{ id: 'mode', category: 'mode',
+        ...(supportedMode && { currentValue: 'agent', options: [{ value: 'agent', name: 'Agent' }, { value: supportedMode, name: 'Read Only' }] }) }, {
         id: 'model', category: 'model', currentValue: 'fixture-model',
         options: [{ group: 'routing', name: '路由', options: [{ value: 'default[]', name: 'Auto' }] }, { value: 'fixture-model', name: 'Fixture' }],
       }] })
     }
   }
   if (method === 'session/set_config_option') {
-    if (params.configId === 'mode') mode = params.value
+    if (params.configId === 'mode') {
+      const supportedMode = process.env.FRONT_DAY_FIXTURE_MODE
+      if (supportedMode && params.value !== supportedMode) {
+        send({ id, error: { code: -32602, message: 'Expected the advertised mode' } })
+        return
+      }
+      mode = params.value
+    }
     if (params.configId === 'model') {
       if (!['default[]', 'fixture-model'].includes(params.value)) {
         send({ id, error: { code: -32602, message: 'Expected the advertised model ID' } })
@@ -102,7 +125,13 @@ createInterface({ input: process.stdin }).on('line', line => {
     }
     result(id, {})
   }
-  if (method === 'thread/start') result(id, { thread: { id: sessionId }, model: 'fixture-model' })
+  if (method === 'thread/start') {
+    if (process.env.FRONT_DAY_FIXTURE_PROBE_ONLY && params.ephemeral !== true) {
+      send({ id, error: { code: -32602, message: 'Expected an ephemeral probe' } })
+      return
+    }
+    result(id, { thread: { id: sessionId }, model: 'fixture-model' })
+  }
   if (method === 'thread/resume') {
     if (params.excludeTurns !== true) { send({ id, error: { code: -32602, message: 'Full history requested' } }); return }
     sessionId = params.threadId
@@ -111,7 +140,18 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'session/prompt' || method === 'turn/start') {
     const prompt = String((params.prompt ?? params.input)[0].text)
     current = { request: id, prompt, id: `turn-${++turn}` }
+    if (!acp && prompt.includes('HOLD_FOR_CANCEL')) {
+      const turnId = current.id
+      setTimeout(() => result(id, { turn: { id: turnId, status: 'inProgress' } }), 400)
+      return
+    }
     if (!acp) result(id, { turn: { id: current.id, status: 'inProgress' } })
+    if (cursor && prompt.includes('CANCEL_APPROVAL')) {
+      send({ id: 'approval', method: 'session/request_permission', params: { sessionId,
+        toolCall: { title: '等待撤回的授权' }, options: [{ optionId: 'allow-once', name: 'Allow', kind: 'allow_once' }] } })
+      setTimeout(() => send({ method: '$/cancel_request', params: { requestId: 'approval' } }), 1000)
+      return
+    }
     if (prompt.includes('HOLD_FOR_CANCEL')) return
     if (prompt.includes('REQUEST_INPUT')) {
       if (cursor) {

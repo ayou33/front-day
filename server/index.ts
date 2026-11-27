@@ -4,16 +4,22 @@ import { readFile, stat } from 'node:fs/promises'
 import { extname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
-import type { Config, ConfigKind } from '../shared/contracts.ts'
+import { randomUUID } from 'node:crypto'
+import { archivedRun, isApiExecutor, statusLabels } from '../shared/contracts.ts'
+import type { Config, ConfigKind, Run, RunState } from '../shared/contracts.ts'
 import type { Preferences } from '../shared/preferences.ts'
-import { accountWriteSchema, configSchemas, dispatchSchema } from '../shared/schemas.ts'
+import { accountWriteSchema, agentPromptWriteSchema, configSchemas, dispatchSchema, planDatePatchSchema, planDateSchema, planDatesSchema } from '../shared/schemas.ts'
+import { localPlanDate, pastPlanDateError } from '../shared/plans.ts'
 import { approvalModes } from '../shared/engines.ts'
+import { modelApiId } from '../shared/prompt-optimizer.ts'
 import { browseDirectories } from './directories.ts'
 import { inspectEngine, localEngines } from './engine-connections.ts'
 import { HttpError, errorMessage } from './errors.ts'
+import { generateLocalText } from './local-optimizer.ts'
 import { loadPreferences, preferencesSchema, savePreferences } from './preferences.ts'
-import { optimizePrompt, optimizerInputSchema, optimizerSettingsSchema } from './prompt-optimizer.ts'
-import { accountOrigin, projectDirectory, resourceFilePath, webUrl, withinDirectory } from './resources.ts'
+import { agentPromptOptimizerSchema, generateModelText, inspectModelApi, modelApiProviderSchema, modelApiSettingsSchema, optimizeAgentPrompt, optimizePrompt, optimizerInputSchema, optimizerSettingsSchema } from './prompt-optimizer.ts'
+import type { TextGenerator } from './prompt-optimizer.ts'
+import { accountOrigin, localPath, projectDirectory, webUrl, withinDirectory } from './resources.ts'
 import { object } from './rpc.ts'
 import { Store } from './storage.ts'
 import { Workflow } from './workflow.ts'
@@ -65,8 +71,12 @@ function send(res: ServerResponse, body: unknown, status = 200) {
   res.end(JSON.stringify(body))
 }
 
+function publicRun(run: Run) {
+  return run.archivedAt ? archivedRun(run, run.archivedAt) : run
+}
+
 function events(req: IncomingMessage, res: ServerResponse, id: string, url: URL) {
-  workflow.requireRun(id)
+  workflow.requireUnarchivedRun(id)
   let last = Math.max(0, Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? 0) || 0)
   if (!Number.isSafeInteger(last)) last = 0
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' })
@@ -77,7 +87,10 @@ function events(req: IncomingMessage, res: ServerResponse, id: string, url: URL)
     res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`)
     last = event.seq
   }
-  const unsubscribe = store.subscribe(id, write)
+  const unsubscribe = store.subscribe(id, event => {
+    write(event)
+    if (event.kind === 'state' && (event.data as RunState).archivedAt) res.end()
+  })
   const timer = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n') }, 15_000)
   eventStreams.add(res)
   res.once('close', () => { unsubscribe(); clearInterval(timer); eventStreams.delete(res) })
@@ -90,7 +103,7 @@ function events(req: IncomingMessage, res: ServerResponse, id: string, url: URL)
 
 async function updatePreferences(next: Preferences) {
   if (closing || switchingDirectory) throw new HttpError(409, '服务正在切换数据目录或退出')
-  if (next.defaultEngineId && !store.getConfig('engines', next.defaultEngineId)) throw new HttpError(400, '请选择可用的引擎配置')
+  if (next.defaultEngineId && !store.getExecutor(next.defaultEngineId)) throw new HttpError(400, '请选择可用的执行器')
   if (!relative(preferences.dataDirectory, next.dataDirectory)) {
     const updated = { ...next, dataDirectory: preferences.dataDirectory }
     savePreferences(preferencesFile, updated)
@@ -120,6 +133,19 @@ async function updatePreferences(next: Preferences) {
   } finally { switchingDirectory = false }
 }
 
+function configuredOptimizer(expectedExecutorId?: string): TextGenerator {
+  const config = store.promptOptimizer()
+  const executor = config.enabled ? store.getExecutor(config.executorId, 'optimization') : undefined
+  if (!executor) throw new HttpError(409, '请先在配置中启用提示词优化')
+  if (expectedExecutorId && expectedExecutorId !== executor.id) throw new HttpError(409, '提示词优化执行器已变更，请刷新页面后重试')
+  if (isApiExecutor(executor)) {
+    const key = store.modelApiKey(executor.id)
+    return (input, instructions) => generateModelText(executor, key, input, instructions)
+  }
+  const excludedEnv = store.listConfig('accounts').map(account => account.secretEnv)
+  return (input, instructions) => generateLocalText(executor, excludedEnv, input, instructions)
+}
+
 async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: string[]) {
   const [, section, id, action, requestId] = parts
   if (req.method === 'GET' && section === 'ping' && parts.length === 2) return send(res, { ready: true })
@@ -128,32 +154,81 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
     const promptOptimizer = store.promptOptimizer()
     return send(res, { ...catalog, promptOptimizer, engineAvailability: await localEngines(catalog.engines, catalog.accounts.map(account => account.secretEnv)) })
   }
+  if (section === 'model-apis') {
+    if (req.method === 'GET' && parts.length === 2) return send(res, store.modelApis())
+    if (req.method === 'POST' && parts.length === 2) {
+      const { apiKey, ...config } = modelApiSettingsSchema.extend({ provider: modelApiProviderSchema }).parse(await json(req))
+      const initial = modelApiId(config.provider)
+      const exists = store.modelApis().some(profile => profile.id === initial)
+      return send(res, store.saveModelApi(config, apiKey, exists ? `api:${randomUUID()}` : initial), 201)
+    }
+    const profile = id && store.modelApis().find(item => item.id === id)
+    if (req.method === 'POST' && action === 'health' && parts.length === 4) {
+      if (!profile) throw new HttpError(404, '找不到厂商配置')
+      if (!profile.hasApiKey) return send(res, { status: 'key', message: '请先保存 API Key', elapsedMs: 0 })
+      let key: string
+      try { key = store.modelApiKey(profile.id) }
+      catch { return send(res, { status: 'key', message: '无法读取保存的密钥，请重新保存', elapsedMs: 0 }) }
+      return send(res, await inspectModelApi(profile, key))
+    }
+    if (req.method === 'PUT' && id && parts.length === 3) {
+      if (id.startsWith('api:') && !profile) throw new HttpError(404, '找不到厂商配置')
+      const provider = profile ? profile.provider : modelApiProviderSchema.parse(id)
+      const { apiKey, ...config } = modelApiSettingsSchema.parse(await json(req))
+      return send(res, store.saveModelApi({ provider, ...config }, apiKey, profile ? profile.id : undefined))
+    }
+    if (req.method === 'DELETE' && id && parts.length === 3) {
+      if (id.startsWith('api:') && !profile) throw new HttpError(404, '找不到厂商配置')
+      return send(res, store.deleteModelApi(id))
+    }
+  }
   if (section === 'prompt-optimizer' && parts.length === 2) {
     if (req.method === 'GET') return send(res, store.promptOptimizer())
     if (req.method === 'PUT') {
-      const { apiKey, ...config } = optimizerSettingsSchema.parse(await json(req))
-      return send(res, store.savePromptOptimizer(config, apiKey))
+      return send(res, store.savePromptOptimizer(optimizerSettingsSchema.parse(await json(req))))
     }
     if (req.method === 'POST') {
       const input = optimizerInputSchema.parse(await json(req))
-      const config = store.promptOptimizer()
-      if (!config.enabled) throw new HttpError(409, '请先在配置中启用提示词优化')
-      if (input.provider && input.provider !== config.provider) throw new HttpError(409, '提示词优化厂商已变更，请刷新页面后重试')
-      return send(res, await optimizePrompt(config, store.promptOptimizerKey(config.provider), input))
+      return send(res, await optimizePrompt(configuredOptimizer(input.executorId), input))
     }
   }
   if (req.method === 'GET' && section === 'directories' && parts.length === 2) {
     return send(res, await browseDirectories(root, url.searchParams.get('path'), url.searchParams.get('files') === '1'))
   }
+  if (section === 'config' && id === 'plan-day-marks' && parts.length <= 4) {
+    if (req.method === 'GET' && !action) return send(res, store.listConfig(id))
+    if (req.method === 'PUT' && action) {
+      const date = planDateSchema.parse(action)
+      const config = configSchemas[id].parse(await json(req))
+      if (config.marks.length) return send(res, store.saveConfig(id, config, date))
+      store.deleteConfig(id, date)
+      return send(res, { id: date, marks: [] })
+    }
+    throw new HttpError(404, '找不到请求的接口')
+  }
   if (section === 'config' && id && Object.hasOwn(configSchemas, id) && parts.length <= 4) {
     const kind = id as ConfigKind
+    if (kind === 'plan-items' && req.method === 'GET' && !action) return send(res, store.listConfig(kind))
+    if (kind === 'plan-items' && req.method === 'PATCH' && action) {
+      const body = object(await json(req))
+      const item = store.getConfig(kind, action)
+      if (!item) throw new HttpError(404, '计划项已删除')
+      if (body.order !== undefined) {
+        return send(res, store.saveConfig(kind, { ...item, order: z.number().int().nonnegative().parse(body.order) }, action))
+      }
+      const patch = planDatePatchSchema.parse(body)
+      const dates = planDatesSchema.parse({ ...item, ...patch })
+      const error = pastPlanDateError(dates, localPlanDate(), item)
+      if (error) throw new HttpError(400, error)
+      return send(res, store.saveConfig(kind, { ...item, ...dates }, action))
+    }
     if (req.method === 'DELETE' && action) {
       store.deleteConfig(kind, action)
       return send(res, { ok: true })
     }
     if ((req.method === 'POST' && !action) || (req.method === 'PUT' && action)) {
-      if (action && !store.getConfig(kind, action)) throw new HttpError(404, '配置已删除')
       const body = await json(req)
+      if (action && !store.getConfig(kind, action)) throw new HttpError(404, '配置已删除')
       if (kind === 'accounts') {
         const { password, ...account } = accountWriteSchema.parse(body)
         account.origin = accountOrigin(account)
@@ -164,6 +239,11 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
         return send(res, store.saveAccount(account, password, action), action ? 200 : 201)
       }
       const config = configSchemas[kind].parse(body)
+      if (kind === 'plan-items') {
+        const previous = action ? store.getConfig(kind, action) : undefined
+        const error = pastPlanDateError(config as Config<'plan-items'>, localPlanDate(), previous)
+        if (error) throw new HttpError(400, error)
+      }
       if (kind === 'projects') {
         const project = config as Config<'projects'>
         const existing = action && store.getConfig('projects', action)
@@ -191,8 +271,8 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
         }
         if (resource.kind === 'file' && isAbsolute(resource.value)) {
           const current = action && store.getConfig('resources', action)
-          if (!current || current.value !== resource.value || current.projectId !== resource.projectId || current.kind !== 'file') {
-            resource.value = await resourceFilePath(resource.value, await projectDirectory(project.directory))
+          if (!current || current.value !== resource.value || current.projectId !== resource.projectId) {
+            resource.value = (await localPath(resource.value, await projectDirectory(project.directory))).path
             if (store.getConfig('projects', project.id)?.directory !== project.directory
               || (resource.iterationId && store.getConfig('iterations', resource.iterationId)?.projectId !== project.id)) {
               throw new HttpError(409, '项目目录或迭代已变更，请重新选择文件')
@@ -206,20 +286,63 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
   if (section === 'engines' && id && action === 'health' && req.method === 'GET') {
     const engine = store.getConfig('engines', id)
     if (!engine) throw new HttpError(404, '找不到这个引擎配置')
-    return send(res, await inspectEngine(engine, root, store.listConfig('accounts').map(account => account.secretEnv)))
+    const projectId = url.searchParams.get('projectId')
+    const project = projectId ? store.getConfig('projects', projectId) : undefined
+    if (projectId && !project) throw new HttpError(404, '找不到所选项目')
+    const cwd = project ? await projectDirectory(project.directory) : root
+    return send(res, await inspectEngine(engine, cwd, store.listConfig('accounts').map(account => account.secretEnv), project?.id))
   }
   if (section === 'runs') {
+    if (req.method === 'GET' && !action) {
+      const params = url.searchParams
+      if (id === 'activity') return send(res, { active: store.hasActiveRuns() })
+      if (id === 'recent') {
+        const query = z.object({ project: z.string().min(1).max(100), iteration: z.string().max(100).optional(),
+          limit: z.coerce.number().int().min(1).max(30).default(5) }).parse(Object.fromEntries(params))
+        return send(res, store.recentRuns(query.project, query.iteration, query.limit))
+      }
+      if (id === 'page') {
+        const query = z.object({ archived: z.enum(['0', '1']).default('0'), limit: z.coerce.number().int().min(1).max(50).default(20),
+          projectId: z.string().min(1).max(100).optional(), iterationId: z.string().min(1).max(100).optional(),
+          status: z.enum(Object.keys(statusLabels)).optional(), query: z.string().trim().max(200).optional(),
+          cursor: z.string().regex(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\|[a-z0-9-]{1,100}$/i).optional(),
+        }).parse(Object.fromEntries(params))
+        return send(res, store.runPage({ ...query, archived: query.archived === '1' }))
+      }
+    }
     if (req.method === 'GET' && !id) return send(res, workflow.store.summaries())
-    if (req.method === 'POST' && !id) return send(res, await workflow.dispatch(dispatchSchema.parse(await json(req))), 201)
+    if (req.method === 'POST' && !id) return send(res, publicRun(await workflow.dispatch(dispatchSchema.parse(await json(req)))), 201)
     if (id && req.method === 'GET' && action === 'events') return events(req, res, id, url)
+    if (id && req.method === 'GET' && action === 'related') {
+      return send(res, store.relatedRuns(id))
+    }
+    if (id && req.method === 'GET' && action === 'context-difference') return send(res, workflow.contextDifference(id))
+    if (id && req.method === 'PUT' && !action) return send(res, await workflow.update(id, dispatchSchema.parse(await json(req))))
+    if (id && !requestId && (action === 'prompt' || action === 'optimize-prompt')) {
+      const stage = z.coerce.number().int().min(0).parse(url.searchParams.get('stage') ?? 0)
+      if (req.method === 'GET' && action === 'prompt') return send(res, await workflow.previewPrompt(id, stage))
+      if (req.method === 'PUT' && action === 'prompt') {
+        const { text, revision } = agentPromptWriteSchema.parse(await json(req))
+        return send(res, workflow.updatePrompt(id, stage, text, revision))
+      }
+      if (req.method === 'POST' && action === 'optimize-prompt') {
+        const input = agentPromptOptimizerSchema.parse(await json(req))
+        const { run } = workflow.requirePromptStage(id, stage)
+        const result = await optimizeAgentPrompt(configuredOptimizer(input.executorId), input.text)
+        if (workflow.requirePromptStage(id, stage).run.revision !== run.revision) throw new HttpError(409, '任务已变更，请重新查看提示词')
+        return send(res, result)
+      }
+    }
     if (id && req.method === 'GET' && action === 'context') {
       const stage = z.coerce.number().int().min(0).parse(url.searchParams.get('stage') ?? 0)
       return send(res, await workflow.readContext(id, stage, requestId))
     }
-    if (id && req.method === 'GET' && !action) return send(res, workflow.requireRun(id))
+    if (id && req.method === 'GET' && !action) return send(res, publicRun(workflow.requireRun(id)))
     if (id && req.method === 'POST' && action) {
       const body = object(await json(req))
+      if (action !== 'unarchive') workflow.requireUnarchivedRun(id)
       if (action === 'advance') workflow.advance(id)
+      else if (action === 'start') await workflow.start(id, z.number().int().nonnegative().optional().parse(body.revision))
       else if (action === 'stop') workflow.stop(id)
       else if (action === 'retry') await workflow.retry(id, body.refreshResources !== false)
       else if (action === 'archive' || action === 'unarchive') workflow.setArchived(id, action === 'archive')
@@ -227,7 +350,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, parts: s
       else if (action === 'followup') workflow.followup(id, z.string().trim().min(1).max(100_000).parse(body.text))
       else if (action === 'interactions' && requestId) workflow.answer(id, requestId, body)
       else throw new HttpError(404, '找不到操作')
-      return send(res, workflow.requireRun(id))
+      return send(res, publicRun(workflow.requireRun(id)))
     }
   }
   throw new HttpError(404, '找不到请求的接口')

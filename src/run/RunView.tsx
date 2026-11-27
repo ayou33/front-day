@@ -1,40 +1,71 @@
-import { useMemo, useState } from 'react'
-import { Activity, Archive, ArchiveRestore, ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleDashed, FlaskConical, GitFork, Hourglass, LoaderCircle, Radio, RotateCcw, Send, Square, Terminal } from 'lucide-react'
-import { statusLabels, terminalStatuses } from '../../shared/contracts.ts'
+import { useEffect, useMemo, useState } from 'react'
+import { Activity, Archive, ArchiveRestore, ArrowLeft, ArrowRight, CircleAlert, CircleCheck, CircleDashed, FlaskConical, GitFork, Hourglass, LoaderCircle, Pencil, Play, Radio, RotateCcw, Send, Square, Terminal } from 'lucide-react'
+import { canArchiveTask, canEditTask, isApiExecutor, statusLabels, terminalStatuses } from '../../shared/contracts.ts'
 import { taskTypeLabel } from '../../shared/context.ts'
-import type { Run } from '../../shared/contracts.ts'
-import { runAction } from '../api.ts'
+import type { Catalog, ContextDifference, Run, RunGroup, RunRecord } from '../../shared/contracts.ts'
+import { apiTaskLimits } from '../../shared/prompt-optimizer.ts'
+import type { PromptOptimizerSettings } from '../../shared/prompt-optimizer.ts'
+import { request, runAction } from '../api.ts'
 import { approvalLabels } from '../../shared/engines.ts'
 import { continuationLabels } from '../../shared/continuations.ts'
-import { ApprovalOptions, Check, dateTime, Empty, ErrorLine, message, Status } from '../ui.tsx'
+import { ApprovalOptions, Check, dateTime, Empty, ErrorLine, formatDuration, message, Status } from '../ui.tsx'
 import { InteractionCard } from './InteractionCard.tsx'
+import { FileChanges } from './FileChanges.tsx'
 import { OutputReader } from './OutputReader.tsx'
 import { RunContext } from './RunContext.tsx'
 import { MessageText, Transcript } from './Transcript.tsx'
+import { useElapsed } from './useElapsed.ts'
 import { details, textOf, timeline } from './run-text.ts'
 import type { RecordData } from './run-text.ts'
 import { useRun } from './useRun.ts'
 
-export function RunView({ id, back, followOutput, setArchived, onContinue }: {
+export function RunView({ id, back, followOutput, setArchived, onContinue, onEdit, optimizer, catalog }: {
   id: string; back: (projectId?: string, iterationId?: string) => void; followOutput: boolean
-  setArchived: (id: string, archived: boolean) => Promise<Run>
+  setArchived: (id: string, archived: boolean) => Promise<RunRecord>
   onContinue: (run: Run) => void
+  onEdit: (run: Run) => void
+  optimizer?: PromptOptimizerSettings
+  catalog: Catalog
 }) {
-  const { run, events, connected, error: loadError, accept } = useRun(id)
+  const { run, archived, events, connected, error: loadError, accept } = useRun(id)
   const [stageOverride, setStageOverride] = useState<number | null>(null)
   const [attemptOverride, setAttemptOverride] = useState<number | null>(null)
-  const [tab, setTab] = useState<'timeline' | 'context' | 'result' | 'tools' | 'test' | 'native'>('timeline')
+  const [tab, setTab] = useState<'timeline' | 'context' | 'result' | 'files' | 'tools' | 'test' | 'native' | null>(null)
   const [followup, setFollowup] = useState('')
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState(false)
   const [refreshResources, setRefreshResources] = useState(true)
   const [pendingId, setPendingId] = useState('')
+  const [difference, setDifference] = useState<ContextDifference>()
+  const [continuations, setContinuations] = useState<RunGroup>()
+  const unarchived = !!run
+  useEffect(() => {
+    if (!unarchived) return
+    let active = true
+    void request<RunGroup>(`/runs/${id}/related`).then(result => { if (active) setContinuations(result) }).catch(() => {})
+    return () => { active = false }
+  }, [id, unarchived, run?.status])
+  const editable = !!run && canEditTask(run)
+  const revision = run?.revision
+  useEffect(() => {
+    if (!editable) { setDifference(undefined); return }
+    let active = true
+    const refresh = () => {
+      if (document.hidden) return
+      void request<ContextDifference>(`/runs/${id}/context-difference`).then(value => { if (active) setDifference(value) })
+        .catch(error => { if (active) setDifference({ changes: [], unavailable: message(error) }) })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 5000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [editable, id, revision])
   const stageIndex = stageOverride ?? run?.stageIndex ?? 0
   const attempt = attemptOverride ?? (run?.status === 'queued' && stageIndex === run.stageIndex ? 0 : run?.attempts[stageIndex]?.length ?? 0)
   const filtered = useMemo(() => events.filter(event => event.stageIndex === stageIndex && event.attempt === attempt && event.kind !== 'state'), [events, stageIndex, attempt])
   const frames = useMemo(() => timeline(filtered), [filtered])
   const toolFrames = useMemo(() => frames.filter(frame => frame.kind === 'agent_item' || frame.kind === 'test_output'), [frames])
   const messageFrames = useMemo(() => frames.filter(frame => frame.kind !== 'agent_item' && frame.kind !== 'test_output'), [frames])
+  const elapsed = useElapsed(run)
 
   async function action(action: string, body: RecordData = {}) {
     if (busy) return false
@@ -49,23 +80,35 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
     finally { setBusy(false) }
   }
 
+  if (archived) return <div className="run-detail">
+    <div className="run-back action-row"><a className="back-button" href="#/runs">返回任务记录</a></div>
+    <div className="run-heading"><div><h1>{archived.title}</h1><div className="run-meta"><span>{archived.project.name}</span>
+      {archived.iteration && <span>{archived.iteration.name}</span>}<span className="chip"><Archive size={13} />已归档</span></div></div>
+      <button className="button primary" disabled={busy} onClick={() => void action('unarchive')}><ArchiveRestore size={15} />恢复任务</button>
+    </div>
+    <p className="caption">恢复任务后可以查看详情或继续操作。</p>
+    <ErrorLine text={actionError} />
+  </div>
   if (!run) return <><button className="back-button" onClick={() => back()}><ArrowLeft size={16} />项目</button>{loadError ? <ErrorLine text={loadError} /> : <div className="loading">正在读取任务…</div>}</>
   const status = run.status
   const stage = run.stages[stageIndex]
   const current = run.attempts[stageIndex]?.[attempt - 1]
-  const actionable = !terminalStatuses.has(status) && status !== 'stopping'
-  const retry = ['failed', 'stopped', 'interrupted'].includes(status)
+  const saved = status === 'saved'
+  const actionable = !terminalStatuses.has(status) && status !== 'stopping' && !saved
+  const lastAcceptance = run.attempts[run.stageIndex]?.at(-1)?.acceptance
+  const retry = ['failed', 'stopped', 'interrupted'].includes(status) || (status === 'succeeded' && ['failed', 'blocked'].includes(lastAcceptance?.status ?? ''))
   const canFollowup = actionable && !!run.attempts[run.stageIndex]?.at(-1)?.sessionId && status !== 'queued'
   const result = current?.output?.trim()
-  const visibleTabs = ([['timeline', '执行过程'], ['context', '任务上下文'], ['result', '执行结果'], ['test', '测试结果'], ['tools', '工具与日志'], ['native', '原始事件']] as const)
-    .filter(([key]) => (key !== 'test' || stage.kind === 'test') && (key !== 'result' || result))
-  const activeTab = visibleTabs.some(([key]) => key === tab) ? tab : 'timeline'
+  const visibleTabs = ([['timeline', '执行过程'], ['context', '任务上下文'], ['result', '执行结果'], ['files', '文件变更'], ['test', '测试结果'], ['tools', '工具与日志'], ['native', '原始事件']] as const)
+    .filter(([key]) => (key !== 'test' || stage.kind === 'test' || stage.acceptance === 'test') && (key !== 'result' || result) && (key !== 'files' || current))
+  const preferredTab = tab ?? (saved ? 'context' : 'timeline')
+  const activeTab = visibleTabs.some(([key]) => key === preferredTab) ? preferredTab : 'timeline'
   const liveStage = run.stages[run.stageIndex]
   const liveAttempt = status === 'queued' ? undefined : run.attempts[run.stageIndex]?.at(-1)
   const contextMode = liveAttempt?.contextMode ?? run.attempts.flat().findLast(item => item.contextMode)?.contextMode
   const processing = status === 'running' || status === 'stopping'
   const waiting = ['waiting_approval', 'waiting_input', 'waiting_stage', 'queued'].includes(status)
-  const StateIcon = processing ? LoaderCircle : waiting ? Hourglass : status === 'succeeded' ? CircleCheck : CircleAlert
+  const StateIcon = processing ? LoaderCircle : saved ? CircleDashed : waiting ? Hourglass : status === 'succeeded' ? CircleCheck : CircleAlert
   const pending = run.pending.find(item => item.id === pendingId) ?? run.pending[0]
   const hasInteractions = status === 'waiting_stage' || !!pending
   const historical = stageIndex < run.stageIndex || (attempt > 0 && (status === 'queued' || attempt !== run.attempts[stageIndex]?.length))
@@ -78,16 +121,17 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
     <div className="run-heading"><div><h1>{run.title}</h1>
       <div className="run-meta"><span>{run.project.name}</span>{run.iteration && <span>{run.iteration.name}</span>}{run.goal && <span>{taskTypeLabel(run.taskType)}</span>}
         {run.templateName && <span><GitFork size={15} />{run.templateName}</span>}<span>开始于 {dateTime(run.createdAt)}</span>
-        {run.archivedAt && <span className="chip"><Archive size={13} />已归档</span>}
+        {run.durationMs !== undefined && <span>耗时 {formatDuration(run.durationMs)}</span>}
         {run.continuation && <a href={`#/runs/${encodeURIComponent(run.continuation.parentId)}`}>来源任务 · {run.continuation.parentTitle}</a>}
         {contextMode && <span className="chip">{continuationLabels[contextMode]}</span>}</div></div>
       <div className="action-row">
-        {status === 'succeeded' && !run.archivedAt && <button className="button primary" onClick={() => {
+        {(status === 'succeeded' || status === 'interrupted') && <button className="button primary" onClick={() => {
           setActionError('')
           try { onContinue(run) } catch (error) { setActionError(message(error)) }
         }}><GitFork size={15} />继续修改</button>}
-        <button className="button" disabled={busy} onClick={() => void action(run.archivedAt ? 'unarchive' : 'archive')}>
-          {run.archivedAt ? <ArchiveRestore size={15} /> : <Archive size={15} />}{run.archivedAt ? '恢复任务' : '归档任务'}</button>
+        {saved && <button className="button primary" disabled={busy} onClick={() => { setStageOverride(null); setAttemptOverride(null); setTab('timeline'); void action('start', { revision }) }}><Play size={15} />开始任务</button>}
+        {editable && <button className="button" disabled={busy} onClick={() => onEdit(run)}><Pencil size={15} />编辑任务</button>}
+        {canArchiveTask(run) && !run.continuation && <button className="button" disabled={busy} onClick={() => void action('archive')}><Archive size={15} />归档任务</button>}
         {actionable && <button className="button" disabled={busy} onClick={() => void action('stop')}><Square size={14} />停止</button>}
         {retry && <><Check checked={refreshResources} onChange={setRefreshResources}>使用最新项目、迭代和要素</Check>
           <button className="button primary" disabled={busy} onClick={() => { setStageOverride(null); setAttemptOverride(null); setTab('timeline'); void action('retry', { refreshResources }) }}><RotateCcw size={15} />{run.templateName ? '重试当前阶段' : '重试任务'}</button></>}
@@ -96,6 +140,7 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
     <div className={`run-status-bar status--${status}`}>
       <div className="run-status-text" role="status"><StateIcon className={processing ? 'run-status-spinner' : undefined} size={20} aria-hidden="true" />
         <strong>{statusLabels[status]}</strong><span>{[liveStage?.name, liveAttempt && `第 ${liveAttempt.number} 次尝试`, liveAttempt?.endedAt && `结束于 ${dateTime(liveAttempt.endedAt)}`].filter(Boolean).join(' · ')}</span>
+        {elapsed !== undefined && elapsed > 0 && !terminalStatuses.has(status) && status !== 'saved' && <span>已执行 {formatDuration(elapsed)}</span>}
       </div>
       {actionable && run.stages.slice(run.stageIndex).some(item => item.engine) && <label className="run-approval-mode"><span>授权模式</span>
         <select disabled={busy} value={run.approvalMode ?? ''} title={`当前模式：${approvalLabels[run.approvalMode ?? liveStage?.engine?.approvalMode ?? 'manual']}`}
@@ -103,8 +148,32 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
       </label>}
     </div>
     <ErrorLine text={actionError || (terminalStatuses.has(status) ? run.error : '') || ''} />
+    {current?.acceptance && <section className="acceptance-note" aria-label="阶段目标验收">
+      <strong>{{ passed: '验收通过', failed: '验收未通过', blocked: '验收受阻', unchecked: '未自动验收' }[current.acceptance.status]}</strong>
+      <span>{current.acceptance.message}</span>
+      {!!current.acceptance.files?.length && <button className="row-link" onClick={() => setTab('files')}>查看文件变更</button>}
+    </section>}
+    {stage.engine && isApiExecutor(stage.engine) && <details className="event-item api-usage"><summary>API 用量与执行限制</summary>
+      <div className="scope-body">
+        {current?.apiMetrics && <p>已调用 {current.apiMetrics.rounds} / {apiTaskLimits.rounds} 轮 · 厂商请求累计 {current.apiMetrics.elapsedMs.toLocaleString()} ms
+          {current.apiMetrics.inputTokens !== undefined && ` · 输入 ${current.apiMetrics.inputTokens.toLocaleString()} tokens`}
+          {current.apiMetrics.outputTokens !== undefined && ` · 输出 ${current.apiMetrics.outputTokens.toLocaleString()} tokens`}
+          {current.apiMetrics.totalTokens !== undefined && ` · 总计 ${current.apiMetrics.totalTokens.toLocaleString()} tokens`}</p>}
+        {current?.apiMetrics && current.apiMetrics.measuredRounds < current.apiMetrics.rounds && <p className="caption">部分调用未收到厂商 token 统计。</p>}
+        <p className="caption">每阶段 {apiTaskLimits.rounds} 轮，上报用量预算 {apiTaskLimits.tokens.toLocaleString()} tokens，输入上限 {apiTaskLimits.inputChars.toLocaleString()} 字符。文件上限 2 MB，每次读取 16 KB，单次补丁 8 KB。</p>
+      </div>
+    </details>}
+    {continuations && continuations.runs.length > 1 && <details className="event-item">
+      <summary>续改记录 · {continuations.runs.length - 1} 条</summary>
+      <ul className="run-continuations">{[...continuations.runs].reverse().map(item => <li key={item.id}>
+        {item.id === run.id || item.archivedAt ? <strong>{item.title}</strong> : <a href={`#/runs/${encodeURIComponent(item.id)}`}>{item.title}</a>}
+        <span className="caption">{[item.id === continuations.source.id ? '源任务' : item.continuation && `续改自 ${item.continuation.parentTitle}`,
+          item.contextMode && continuationLabels[item.contextMode], item.id === run.id && '当前任务', item.archivedAt ? '已归档' : statusLabels[item.status]].filter(Boolean).join(' · ')}</span>
+      </li>)}</ul>
+    </details>}
     {hasInteractions && <div className="run-interactions" aria-label="待处理的交互">
-      {status === 'waiting_stage' && <section className="gate panel"><Hourglass size={21} /><div><h3>等待人工放行</h3><p>「{liveStage.name}」已完成，可确认结果后继续。</p></div><button className="button primary" disabled={busy} onClick={() => { setStageOverride(null); setAttemptOverride(null); setTab('timeline'); void action('advance') }}>放行下一阶段<ArrowRight size={16} /></button></section>}
+      {status === 'waiting_stage' && <section className="gate panel"><Hourglass size={21} /><div><h3>等待人工放行</h3><p>
+        「{liveStage.name}」已完成，请核对验收结果后继续。</p></div><button className="button primary" disabled={busy} onClick={() => { setStageOverride(null); setAttemptOverride(null); setTab('timeline'); void action('advance') }}>放行下一阶段<ArrowRight size={16} /></button></section>}
       {run.pending.length > 1 && <label className="pending-select">待处理请求 <select value={pending?.id} onChange={event => setPendingId(event.target.value)}>
         {run.pending.map((item, index) => <option value={item.id} key={item.id}>{index + 1} / {run.pending.length} · {item.title}</option>)}
       </select></label>}
@@ -115,7 +184,11 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
         {run.stages.map((stage, index) => {
           const last = run.attempts[index].at(-1)
           const Icon = last?.status === 'succeeded' ? CircleCheck : index === run.stageIndex && actionable ? Activity : CircleDashed
-          return <button key={index} className={`run-stage ${stageIndex === index ? 'active' : ''}`} onClick={() => { setStageOverride(index === run.stageIndex ? null : index); setAttemptOverride(null); setTab('timeline') }}>
+          return <button key={index} className={`run-stage ${stageIndex === index ? 'active' : ''}`} onClick={() => {
+            setStageOverride(index === run.stageIndex ? null : index)
+            setAttemptOverride(null)
+            setTab(currentTab => currentTab === 'files' ? 'files' : saved ? 'context' : 'timeline')
+          }}>
             <Icon size={17} /><div><strong>{stage.name}</strong><small>{stage.engine?.name || '本地测试命令'}</small></div>{index === run.stageIndex && <i />}
           </button>
         })}
@@ -128,13 +201,18 @@ export function RunView({ id, back, followOutput, setArchived, onContinue }: {
             {run.attempts[stageIndex].map(attempt => <option value={attempt.number} key={attempt.number}>第 {attempt.number} 次</option>)}
           </select>}
         </div></div>
-          <div className="tabs" role="tablist" aria-label="任务执行详情">{visibleTabs.map(([key, label]) =>
-            <button role="tab" aria-selected={key === activeTab} key={key} className={key === activeTab ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}</div>
-          <OutputReader key={`${stageIndex}:${attempt}:${activeTab}`} followInitially={followOutput && (activeTab === 'timeline' || activeTab === 'tools')}>
+          <OutputReader viewKey={`${stageIndex}:${attempt}:${activeTab}`} followInitially={followOutput && (activeTab === 'timeline' || activeTab === 'tools')}
+            toolbar={navigation => <div className="run-toolbar">
+              <div className="tabs" role="tablist" aria-label="任务执行详情">{visibleTabs.map(([key, label]) =>
+                <button role="tab" aria-selected={key === activeTab} key={key} className={key === activeTab ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}</div>
+              {navigation}
+            </div>}>
             {historical && current?.error && <div className="attempt-error"><ErrorLine text={current.error} /></div>}
             {activeTab === 'timeline' && (messageFrames.length ? <Transcript frames={messageFrames} /> : <Empty icon={Activity} title="暂无执行消息">开始执行后将在这里显示进度。</Empty>)}
-            {activeTab === 'context' && <RunContext run={run} sentPrompt={sentPrompt} handoff={current?.handoff} historical={historical} />}
+            {activeTab === 'context' && <RunContext run={run} stageIndex={stageIndex} sentPrompt={sentPrompt} handoff={current?.handoff} historical={historical} optimizer={optimizer}
+              onSaved={accept} difference={difference} catalog={catalog} />}
             {activeTab === 'result' && result && <div className="output-result"><MessageText text={result} /></div>}
+            {activeTab === 'files' && current && <FileChanges attempt={current} />}
             {activeTab === 'tools' && (toolFrames.length ? <Transcript frames={toolFrames} /> : <Empty icon={Terminal} title="暂无工具日志" />)}
             {activeTab === 'test' && (current?.test ? <div className="test-detail"><div className="test-header"><Status status={current.test.code === 0 ? 'succeeded' : 'failed'} />
               <span>退出码 {current.test.code ?? '—'}</span><span>{current.test.ms} ms</span>{current.test.signal && <span>{current.test.signal}</span>}</div>

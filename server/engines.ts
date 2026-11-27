@@ -1,15 +1,16 @@
 import type { Engine, EventKind, Interaction } from '../shared/contracts.ts'
 import { engineGuides } from '../shared/engines.ts'
 import type { ApprovalMode } from '../shared/engines.ts'
-import { acpAuthRequired, codexAuth, engineLaunch, initializeEngine } from './engine-connections.ts'
+import { acpAuthRequired, codexAuth, connectEngine, engineLaunch, initializeEngine } from './engine-connections.ts'
+import { openAcpSession, openCodexThread } from './engine-session-setup.ts'
 import { HttpError } from './errors.ts'
-import { StdioRpc, array, object, string } from './rpc.ts'
-import type { JsonObject, RpcId } from './rpc.ts'
+import { array, object, string } from './rpc.ts'
+import type { EngineRpc, JsonObject, RpcId } from './rpc.ts'
 
 const codexDecisions: Record<string, string> = { accept: '本次允许', acceptForSession: '本会话允许', decline: '拒绝', cancel: '取消' }
 const acpDecisions: Record<string, string> = { allow_once: '本次允许', allow_always: '始终允许', reject_once: '本次拒绝', reject_always: '始终拒绝' }
 
-type Hooks = {
+export type EngineHooks = {
   emit: (kind: EventKind, name: string, data: unknown) => void
   request: (interaction: Interaction) => void
   resolved: (id: string) => void
@@ -18,6 +19,7 @@ type Pending = { wireId: RpcId; interaction: Interaction; answer: (data: JsonObj
   auto?: { approve?: string; deny?: string } }
 type ActiveTurn = {
   key: string; id: string; output: string; partial: string; final: boolean
+  started?: Promise<JsonObject>
   done: ReturnType<typeof Promise.withResolvers<string>>
 }
 
@@ -39,21 +41,12 @@ function queryAnswers(interaction: Interaction, data: JsonObject) {
   })
 }
 
-function cursorAutoModel(option: JsonObject | undefined, models: JsonObject) {
-  const choices = [
-    ...array(option?.options).map(object).flatMap(entry => Array.isArray(entry.options) ? entry.options.map(object) : [entry]),
-    ...array(models.availableModels).map(object),
-  ]
-  const auto = choices.find(entry => string(entry.name).trim().toLowerCase() === 'auto')
-  return string(auto?.value ?? auto?.modelId) || 'auto'
-}
-
 function approvalFields(...entries: [label: string, value: unknown, code?: boolean][]): NonNullable<Interaction['fields']> {
   return entries.flatMap(([label, value, code]) => typeof value === 'string' && value.trim() ? [{ label, value, code }] : [])
 }
 
 export class EngineSession {
-  private rpc: StdioRpc
+  private rpc: EngineRpc
   private acp: boolean
   private waiting = new Map<string, Pending>()
   private active?: ActiveTurn
@@ -63,18 +56,19 @@ export class EngineSession {
   private closed = false
   private config: Engine
   private cwd: string
-  private hooks: Hooks
+  private hooks: EngineHooks
   private approvalMode: ApprovalMode
   sessionId = ''
 
-  constructor(config: Engine, executable: string, cwd: string, excludeEnv: string[], hooks: Hooks) {
+  constructor(config: Engine, executable: string, cwd: string, excludeEnv: string[], hooks: EngineHooks) {
     this.config = config
     this.cwd = cwd
     this.hooks = hooks
     this.approvalMode = config.approvalMode ?? 'manual'
     this.acp = config.provider !== 'codex'
-    this.rpc = new StdioRpc({ ...engineLaunch(config.provider, executable, cwd, excludeEnv), args: engineGuides[config.provider].args }, this.acp,
-      (method, params, id) => this.receive(method, params, id), text => hooks.emit('native', 'stderr', { text }))
+    this.rpc = connectEngine(config.provider, engineLaunch(config.provider, executable, cwd, excludeEnv),
+      (method, params, id) => this.receive(method, params, id), text => hooks.emit('native', 'stderr', { text }),
+      id => this.resolveRequest(interactionId(id)))
     void this.rpc.done.then(result => {
       this.closed = true
       this.clearRequests()
@@ -89,58 +83,25 @@ export class EngineSession {
       signal.throwIfAborted()
       const init = await initializeEngine(this.rpc, this.config.provider)
       if (this.acp) {
-        if (resumeId && object(init.agentCapabilities).loadSession !== true) throw new Error('此引擎未声明支持恢复 ACP 会话')
         this.loadingHistory = !!resumeId
-        const session = await this.rpc.call(resumeId ? 'session/load' : 'session/new', { cwd: this.cwd, mcpServers: [], ...(resumeId && { sessionId: resumeId }) })
+        this.sessionId = await openAcpSession(this.rpc, this.config, this.cwd, init, resumeId)
         this.loadingHistory = false
-        this.sessionId = resumeId ?? string(session.sessionId)
-        if (!this.sessionId) throw new Error(`${this.config.name} 未返回会话 ID`)
-        if (this.config.mode !== 'agent') {
-          const mode = this.config.provider === 'cursor' ? this.config.mode : 'plan'
-          await this.setAcpConfig(session, 'mode', mode)
-        }
-        if (this.config.model) await this.setAcpConfig(session, 'model', this.config.model)
       } else {
         const account = await this.rpc.call('account/read', { refreshToken: false })
         if (codexAuth(account) === 'required') throw new Error('当前 Codex CLI 会话尚未登录。请在「引擎」核对路径和登录方式。')
-        const session = await this.rpc.call(resumeId ? 'thread/resume' : 'thread/start', {
-          cwd: this.cwd, ...(this.config.model ? { model: this.config.model } : {}),
-          sandbox: this.config.mode === 'agent' ? 'workspace-write' : 'read-only', approvalPolicy: 'on-request',
-          ...(resumeId && { threadId: resumeId, excludeTurns: true }),
-        })
-        this.sessionId = string(object(session.thread).id)
-        this.model = string(session.model) || this.config.model
-        if (!this.sessionId) throw new Error('Codex 未返回会话 ID')
+        const session = await openCodexThread(this.rpc, this.config, this.cwd, resumeId)
+        this.sessionId = session.id
+        this.model = session.model
       }
       signal.throwIfAborted()
     } catch (error) {
       if (this.acp && acpAuthRequired(error)) throw this.authenticationError()
       throw error
-    } finally { signal.removeEventListener('abort', abort) }
+    } finally { this.loadingHistory = false; signal.removeEventListener('abort', abort) }
   }
 
   private authenticationError() {
     return new Error(`${this.config.name} 需要认证。请在「引擎」查看登录指引，完成后重试。`)
-  }
-
-  private async setAcpConfig(session: JsonObject, category: 'mode' | 'model', value: string) {
-    const option = array(session.configOptions).map(object).find(entry => entry.category === category)
-    const models = object(session.models)
-    const selected = this.config.provider === 'cursor' && category === 'model' && value.toLowerCase() === 'auto'
-      ? cursorAutoModel(option, models) : value
-    try {
-      if (option && string(option.id)) {
-        if (option.currentValue !== selected) await this.rpc.call('session/set_config_option', { sessionId: this.sessionId, configId: option.id, value: selected })
-      } else if (category === 'mode') {
-        if (object(session.modes).currentModeId !== selected) await this.rpc.call('session/set_mode', { sessionId: this.sessionId, modeId: selected })
-      } else if (models.currentModelId !== selected) {
-        await this.rpc.call('session/set_model', { sessionId: this.sessionId, modelId: selected })
-      }
-    } catch (error) {
-      if (acpAuthRequired(error)) throw error
-      const label = category === 'mode' ? '运行模式' : '模型'
-      throw new Error(`${this.config.name} 无法设置${label}「${value}」 · ${error instanceof Error ? error.message : '请检查引擎设置'}`)
-    }
   }
 
   async prompt(text: string) {
@@ -156,12 +117,13 @@ export class EngineSession {
         if (result.stopReason !== 'end_turn') throw new Error(`${this.config.name} 停止 · ${string(result.stopReason) || '未知原因'}`)
         return (turn.partial || turn.output).trim()
       }
-      const result = await this.rpc.call('turn/start', {
+      turn.started = this.rpc.call('turn/start', {
         threadId: this.sessionId, input,
         ...(this.config.mode === 'plan' && this.model ? { collaborationMode: { mode: 'plan', settings: {
           model: this.model, reasoning_effort: null, developer_instructions: null,
         } } } : {}),
       })
+      const result = await turn.started
       turn.id ||= string(object(result.turn).id)
       return await turn.done.promise
     } catch (error) {
@@ -190,8 +152,14 @@ export class EngineSession {
     if (this.closed) return
     for (const request of this.waiting.values()) this.rpc.reply(request.wireId, request.cancel)
     this.clearRequests()
-    if (this.acp) this.rpc.notify('session/cancel', { sessionId: this.sessionId })
-    else if (this.active?.id) await this.rpc.call('turn/interrupt', { threadId: this.sessionId, turnId: this.active.id }, 2000)
+    if (this.acp) {
+      await this.rpc.notify('session/cancel', { sessionId: this.sessionId })
+      return
+    }
+    const turn = this.active
+    if (!turn) return
+    const turnId = turn.id || string(object((await turn.started)?.turn).id)
+    if (this.active === turn && turnId) await this.rpc.call('turn/interrupt', { threadId: this.sessionId, turnId }, 2000)
   }
 
   close() { return this.rpc.close() }

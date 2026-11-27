@@ -1,0 +1,148 @@
+.help-layout {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.help-nav {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+}
+
+.help-nav button {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 13px;
+  font-weight: 550;
+  text-align: start;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.help-nav button:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.help-content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.help-section {
+  scroll-margin-top: 16px;
+}
+
+.help-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+
+.help-steps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: help-step;
+}
+
+.help-steps li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  counter-increment: help-step;
+}
+
+.help-steps li::before {
+  content: counter(help-step);
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--brand-tint);
+  color: var(--brand-ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.help-steps strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 13.5px;
+}
+
+.help-steps p,
+.help-faq p {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.help-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-inline-start: 18px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.help-list li::marker {
+  color: var(--brand-500);
+}
+
+.help-faq details {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.help-faq details:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.help-faq summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.help-faq summary:hover {
+  color: var(--brand-ink);
+}
+
+.help-faq details p {
+  margin-top: 6px;
+}
+
+@media (max-width: 980px) {
+  .help-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .help-nav {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .help-nav button {
+    padding: 6px 9px;
+    border: 1px solid var(--line);
+    font-size: 12px;
+  }
+}

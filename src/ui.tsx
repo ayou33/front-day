@@ -4,12 +4,21 @@ import { AlertCircle, ArrowUpRight, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { taskTypeGroups, taskTypes } from '../shared/context.ts'
 import { statusLabels } from '../shared/contracts.ts'
+import { supportsApiPurpose } from '../shared/prompt-optimizer.ts'
 import { approvalLabels, approvalModes } from '../shared/engines.ts'
-import type { Engine, EngineAvailability, RunStatus, TestCommand } from '../shared/contracts.ts'
+import type { Catalog, Engine, EngineAvailability, RunStatus, TestCommand } from '../shared/contracts.ts'
 
 export const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 export const dateTime = (date: string) => dateFormat.format(new Date(date))
+export function formatDuration(ms?: number) {
+  if (ms === undefined) return ''
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+}
 
 export function Status({ status }: { status: RunStatus }) {
   return <span className={`status status--${status}`}><i />{statusLabels[status]}</span>
@@ -63,6 +72,18 @@ export function EngineOptions({ engines, availability }: { engines: Engine[]; av
       : local?.health && !local.health.connected && local.executable ? ' · 连接失败' : local && !local.executable ? ' · 未找到 CLI' : ''}</option>)
 }
 
+export function hasExecutor(catalog: Catalog, id: string, purpose: 'execution' | 'optimization' = 'execution') {
+  return catalog.engines.some(engine => engine.id === id) || catalog.modelApis?.some(api => api.id === id && api.hasApiKey && supportsApiPurpose(api, purpose)) === true
+}
+
+export function ExecutorOptions({ catalog, purpose = 'execution' }: { catalog: Catalog; purpose?: 'execution' | 'optimization' }) {
+  const apis = catalog.modelApis?.filter(api => api.hasApiKey && supportsApiPurpose(api, purpose)) ?? []
+  return <>
+    {catalog.engines.length > 0 && <optgroup label="本地 Agent"><EngineOptions engines={catalog.engines} availability={catalog.engineAvailability} /></optgroup>}
+    {apis.length > 0 && <optgroup label="厂商 API">{apis.map(api => <option key={api.id} value={api.id}>{api.name}</option>)}</optgroup>}
+  </>
+}
+
 export function Check({ checked, onChange, children }: { checked: boolean; onChange: (value: boolean) => void; children: ReactNode }) {
   return <label className="checkbox"><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} />{children}</label>
 }
@@ -81,22 +102,28 @@ export function Dialog({ title, note, onClose, children, wide }: { title: string
   </dialog>
 }
 
-export function EditForm({ onSubmit, onClose, children, submitLabel = '保存配置' }: {
-  onSubmit: () => Promise<void>; onClose: () => void; children: ReactNode; submitLabel?: string
+export function EditForm({ onSubmit, onSave, onClose, children, submitLabel = '保存配置', saveLabel = '保存', submitDisabled = false }: {
+  onSubmit: () => Promise<void>; onSave?: () => Promise<void>; onClose: () => void; children: ReactNode; submitLabel?: string; saveLabel?: string; submitDisabled?: boolean
 }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  async function submit(event: FormEvent) {
-    event.preventDefault()
+  async function invoke(task: () => Promise<void>) {
     if (busy) return
     setBusy(true)
     setError('')
-    try { await onSubmit() } catch (error) { setError(message(error)) }
+    try { await task() } catch (error) { setError(message(error)) }
     finally { setBusy(false) }
+  }
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (submitDisabled) return
+    await invoke(onSubmit)
   }
   return <form onSubmit={submit} className="edit-form">
     <div className="dialog-body">{children}<ErrorLine text={error} /></div>
-    <div className="dialog-footer"><button type="button" className="button" onClick={onClose}>取消</button><button className="button primary" disabled={busy}>{busy ? '正在提交…' : submitLabel}</button></div>
+    <div className="dialog-footer"><button type="button" className="button" onClick={onClose}>取消</button>
+      {onSave && <button type="button" className="button" disabled={busy} onClick={() => void invoke(onSave)}>{busy ? '正在提交…' : saveLabel}</button>}
+      <button className="button primary" disabled={busy || submitDisabled}>{busy ? '正在提交…' : submitLabel}</button></div>
   </form>
 }
 

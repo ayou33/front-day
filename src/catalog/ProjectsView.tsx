@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, FileText, Folder, FolderOpen, KeyRound, Link2, Milestone, Pencil, Plus, Terminal } from 'lucide-react'
-import { elementTypeGroups, elementTypeHints, projectFields, taskTypeLabel } from '../../shared/context.ts'
+import { ArrowLeft, ArrowRight, Folder, FolderOpen, KeyRound, Link2, Milestone, Pencil, Plus, Terminal } from 'lucide-react'
+import { elementTypeGroups, elementTypeHints, projectFields, taskElements, taskTypeLabel } from '../../shared/context.ts'
 import type { Account, Iteration, Project, Resource, RunSummary } from '../../shared/contracts.ts'
 import { DirectoryPicker } from '../DirectoryPicker.tsx'
+import { ContextScope } from '../ContextScope.tsx'
 import { blankAccount, httpOrigin, ResourceAccountEditor } from '../ResourceAccountEditor.tsx'
 import { Check, CommandFields, Empty, ExternalLink, Field, SectionHeading, Status, dateTime } from '../ui.tsx'
 import { Editor, ItemActions, blankProject, commandOrNull, filePickerStart, projectNameFromDirectory, remove } from './common.tsx'
 import type { Props } from './common.tsx'
 
-const resourceKinds = { url: 'URL', file: '本地文件', text: '文本' }
+const resourceKinds = { url: 'URL', file: '本地路径', text: '文本' }
 const builtInCategories = new Set(elementTypeGroups.flatMap(group => group.types))
 const combinedCategories = new Set(['模板（参考）', '模板(参考)'])
 
@@ -21,7 +22,7 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
   const [contextEdit, setContextEdit] = useState<Project | null>(null)
   const [iterationEdit, setIterationEdit] = useState<Iteration | null>(null)
   const [resourceEdit, setResourceEdit] = useState<Resource | null>(null)
-  const [pickingFile, setPickingFile] = useState(false)
+  const [pickingPath, setPickingPath] = useState(false)
   const [customCategory, setCustomCategory] = useState(false)
   const [resourceAccount, setResourceAccount] = useState<Account | null>(null)
   const project = catalog.projects.find(project => project.id === projectId)
@@ -38,7 +39,7 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
   const fields = projectFields.filter(({ key }) => project?.context?.[key]?.trim())
   function openElement(element: Resource) {
     setCustomCategory(false)
-    setPickingFile(false)
+    setPickingPath(false)
     setResourceEdit(element)
   }
   if (project && iterationId && !iteration) return <section className="panel"><Empty icon={Milestone} title="找不到此迭代"
@@ -75,15 +76,17 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
             <p>{iteration ? '补充本次迭代特有的需求、设计和其他信息。' : '集中管理活动或项目的需求、设计、接口和交付信息。'}</p></div>
             <button className="button" onClick={() => openElement({ id: '', projectId: project.id, iterationId: iteration?.id, name: '', category: '需求', kind: 'text', value: '', prompt: '', fetch: false, accountId: '' })}><Plus size={16} />添加要素</button>
           </div>
-            {resources.length ? resources.map(item => <div className="list-row" key={item.id}><div className="list-icon">{item.kind === 'url' ? <Link2 size={18} /> : <FileText size={18} />}</div>
+            {resources.length ? resources.map(item => <div className="list-row" key={item.id}><div className="list-icon">{item.kind === 'url' ? <Link2 size={18} /> : <FolderOpen size={18} />}</div>
               <div className="list-description"><strong><span>{item.name}</span><span className="chip">{item.category}</span></strong>
-                <div className="ellipsis muted">{item.kind === 'url' ? <ExternalLink href={item.value}>{item.value}</ExternalLink> : item.kind === 'file' ? item.value : null}</div>
+                <div className="ellipsis muted">{item.kind === 'url' ? <ExternalLink href={item.value}>{item.value}</ExternalLink> : item.value}</div>
                 {(item.kind === 'text' || item.prompt) && <details className="resource-detail"><summary>{item.kind === 'text' ? '查看文本' : '查看说明'}</summary>
                   {item.kind === 'text' && <p>{item.value}</p>}{item.prompt && <p>说明 · {item.prompt}</p>}</details>}</div>
               <span className="caption">{resourceKinds[item.kind]}{item.fetch && item.kind === 'url' ? ' · 读取内容' : ''}</span>
               <ItemActions name={item.name} onEdit={() => openElement(item)} onDelete={() => remove('resources', item.id, refresh)} />
             </div>) : <div className="panel-note">支持文本、链接或项目内文件。</div>}
           </section>
+          {iteration && <ContextScope project={project} resources={taskElements(catalog.resources, project.id, iteration.id)}
+            stages={[{ name: '迭代任务默认继承', api: false, allResources: true, resourceIds: [] }]} task={{}} />}
           {!iteration && <section className="panel"><div className="panel-header"><h2>项目迭代</h2>
             <button className="button" onClick={() => setIterationEdit({ id: '', projectId: project.id, name: '', description: '' })}><Plus size={16} />新建迭代</button></div>
             {iterations.length ? iterations.map(item => <button type="button" className="list-row iteration-row" key={item.id} onClick={() => select(project.id, item.id)}>
@@ -107,6 +110,9 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
           <button type="button" className="button" onClick={() => setPickingDirectory(true)}><FolderOpen size={16} />选择目录</button></div>
       </div>
       <Field label="项目名称"><input required maxLength={150} value={projectEdit.name} onChange={event => setProjectEdit({ ...projectEdit, name: event.target.value })} /></Field>
+      <Check checked={projectEdit.apiFiles !== false} onChange={apiFiles => setProjectEdit({ ...projectEdit, apiFiles })}>
+        允许厂商 API 访问项目工作区
+      </Check>
       <details className="optional-fields"><summary>配置测试命令（可选）</summary><div className="optional-body"><CommandFields value={projectEdit.testCommand} onChange={testCommand => setProjectEdit({ ...projectEdit, testCommand })} /></div></details>
     </Editor>}
     {projectEdit && pickingDirectory && <DirectoryPicker initial={projectEdit.directory} close={() => setPickingDirectory(false)} select={directory => {
@@ -128,7 +134,7 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
       <Field label="说明"><textarea rows={3} value={iterationEdit.description} onChange={event => setIterationEdit({ ...iterationEdit, description: event.target.value })} /></Field>
     </Editor>}
     {resourceEdit && resourceEdit.projectId === project?.id && resourceEdit.iterationId === iteration?.id && <Editor kind="resources" value={resourceEdit} close={() => setResourceEdit(null)} refresh={refresh} title={resourceEdit.id ? '编辑要素' : '添加要素'} prepare={() => {
-      if (resourceEdit.kind === 'file' && !resourceEdit.value) throw new Error('请选择本地文件')
+      if (resourceEdit.kind === 'file' && !resourceEdit.value) throw new Error('请选择本地文件或文件夹')
       return resourceEdit
     }}>
       <Field label="要素名称"><input required value={resourceEdit.name} onChange={event => setResourceEdit({ ...resourceEdit, name: event.target.value })} /></Field>
@@ -146,9 +152,9 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
           {Object.entries(resourceKinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></Field></div>
       {customCategory && <Field label="自定义要素类型"><input required maxLength={150} value={resourceEdit.category} onChange={event => setResourceEdit({ ...resourceEdit, category: event.target.value })} /></Field>}
-      {resourceEdit.kind === 'file' ? <div className="field"><label className="directory-label" htmlFor="resource-file">本地文件</label>
-        <div className="directory-address"><input id="resource-file" className="mono" readOnly value={resourceEdit.value} placeholder="请选择文件" />
-          <button type="button" className="button" onClick={() => setPickingFile(true)}><FolderOpen size={16} />选择文件</button></div>
+      {resourceEdit.kind === 'file' ? <div className="field"><label className="directory-label" htmlFor="resource-path">本地路径</label>
+        <div className="directory-address"><input id="resource-path" className="mono" readOnly value={resourceEdit.value} placeholder="请选择文件或文件夹" />
+          <button type="button" className="button" onClick={() => setPickingPath(true)}><FolderOpen size={16} />选择路径</button></div>
       </div> : <Field label={resourceKinds[resourceEdit.kind]}>
         {resourceEdit.kind === 'text' ? <textarea required rows={4} value={resourceEdit.value} onChange={event => setResourceEdit({ ...resourceEdit, value: event.target.value })} /> :
           <input required className="mono" type="url" placeholder="https://…" value={resourceEdit.value} onChange={event => setResourceEdit({ ...resourceEdit, value: event.target.value })} />}
@@ -162,11 +168,18 @@ export function ProjectsView({ catalog, refresh, projectId, iterationId, focusEl
           origin: httpOrigin(resourceEdit.value), type: 'basic', credentialSource: 'saved' })}><KeyRound size={16} />为此要素保存账号密码</button>
       </>}
       <Field label="说明" detail="可选，说明 Agent 应关注什么。"><textarea rows={3} value={resourceEdit.prompt} onChange={event => setResourceEdit({ ...resourceEdit, prompt: event.target.value })} /></Field>
+      <Field label="厂商 API 传送方式" detail="文件要素按需读取。此设置仅影响厂商 API。">
+        <select value={resourceEdit.apiShare ?? 'auto'} onChange={event => setResourceEdit({ ...resourceEdit,
+          apiShare: event.target.value as Resource['apiShare'] })}>
+          <option value="auto">按来源自动处理</option><option value="on-demand">仅按需读取</option><option value="excluded">排除敏感要素</option>
+        </select>
+      </Field>
     </Editor>}
-    {pickingFile && project && resourceEdit?.kind === 'file' && resourceEdit.projectId === project.id && resourceEdit.iterationId === iteration?.id && <DirectoryPicker fileMode title="选择本地文件" projectDirectory={project.directory}
-      initial={filePickerStart(project.directory, resourceEdit.value)} close={() => setPickingFile(false)} select={value => {
+    {pickingPath && project && resourceEdit?.kind === 'file' && resourceEdit.projectId === project.id && resourceEdit.iterationId === iteration?.id && <DirectoryPicker
+      fileMode allowFolder title="选择本地文件或文件夹" projectDirectory={project.directory}
+      initial={filePickerStart(project.directory, resourceEdit.value)} close={() => setPickingPath(false)} select={value => {
         setResourceEdit(current => current && { ...current, value })
-        setPickingFile(false)
+        setPickingPath(false)
       }} />}
     {resourceAccount && <ResourceAccountEditor account={resourceAccount} close={() => setResourceAccount(null)} lockOrigin onSaved={async account => {
       await refresh()

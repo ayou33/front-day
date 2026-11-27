@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import type { Account, Catalog, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
+import { canArchiveTask } from '../shared/contracts.ts'
+import type { Account, AgentPromptPreview, ArchivedRun, Catalog, Engine, EngineHealth, Iteration, Project, Resource, Run, RunSummary, Template } from '../shared/contracts.ts'
 import type { Preferences } from '../shared/preferences.ts'
 import { engineGuides, engineProviders } from '../shared/engines.ts'
 import { Store } from '../server/storage.ts'
@@ -85,32 +86,88 @@ test('资源凭据按来源使用，阶段按目录排队，重启后可从失�
   assert.equal(passed.attempts[0].length, 2)
 })
 
-test('任务可以归档和恢复，服务重启后保留执行记录与所属迭代', async t => {
+test('旧版记录缺少开始标记时仍可按已完成、失败或中断状态归档', () => {
+  for (const status of ['succeeded', 'failed', 'interrupted'] as const) assert.equal(canArchiveTask({ status }), true)
+  for (const status of ['saved', 'queued', 'running', 'waiting_input', 'waiting_approval', 'waiting_stage', 'stopping'] as const) {
+    assert.equal(canArchiveTask({ status, started: true }), false)
+  }
+  assert.equal(canArchiveTask({ status: 'stopped' }), false)
+  assert.equal(canArchiveTask({ status: 'stopped', started: false }), false)
+  assert.equal(canArchiveTask({ status: 'stopped', started: true }), true)
+})
+
+test('发起过且已不活动的任务可归档，归档后需恢复才能操作', async t => {
   const h = await harness()
   let app = await serve(h.dir)
   t.after(async () => { await app.stop(); await h.cleanup() })
   const engine = await app.api<Engine>('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
   const project = await app.api<Project>('/config/projects', 'POST', { name: '归档项目', directory: h.project })
   const iteration = await app.api<Iteration>('/config/iterations', 'POST', { name: '归档迭代', projectId: project.id })
-  const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, iterationId: iteration.id, engineId: engine.id, goal: 'HOLD_FOR_CANCEL' })
-  await waitForRun(app.api, run.id, 'running', current => !!current.attempts[0]?.[0]?.sessionId)
-  const archived = await app.api<Run>(`/runs/${run.id}/archive`, 'POST', {})
+  const defaults = { projectId: project.id, iterationId: iteration.id, engineId: engine.id }
+  const saved = await app.api<Run>('/runs', 'POST', { ...defaults, requestId: randomUUID(), goal: '待开始任务', start: false })
+  await assert.rejects(() => app.api(`/runs/${saved.id}/archive`, 'POST', {}), /非活动状态后方可归档/)
+  const neverStarted = await app.api<Run>('/runs', 'POST', { ...defaults, requestId: randomUUID(), goal: '从未开始的任务', start: false })
+  await app.api(`/runs/${neverStarted.id}/stop`, 'POST', {})
+  await assert.rejects(() => app.api(`/runs/${neverStarted.id}/archive`, 'POST', {}), /非活动状态后方可归档/)
+  const active = await app.api<Run>('/runs', 'POST', { ...defaults, requestId: randomUUID(), goal: 'HOLD_FOR_CANCEL' })
+  await waitForRun(app.api, active.id, 'running', current => !!current.attempts[0]?.[0]?.sessionId)
+  await assert.rejects(() => app.api(`/runs/${active.id}/archive`, 'POST', {}), /非活动状态后方可归档/)
+  await assert.rejects(() => app.api(`/runs/${active.id}`, 'PUT', { ...defaults, requestId: active.id, goal: '执行中编辑' }), /已保存且未开始/)
+  await app.api(`/runs/${saved.id}/start`, 'POST', {})
+  await waitForRun(app.api, saved.id, 'queued')
+  await assert.rejects(() => app.api(`/runs/${saved.id}/prompt`, 'PUT', { text: '排队时编辑' }), /已保存且未开始/)
+  await assert.rejects(() => app.api(`/runs/${saved.id}/archive`, 'POST', {}), /非活动状态后方可归档/)
+  await app.api(`/runs/${saved.id}/stop`, 'POST', {})
+  const stoppedWhileQueued = await waitForRun(app.api, saved.id, 'stopped')
+  assert.equal(stoppedWhileQueued.started, true)
+  assert.equal(stoppedWhileQueued.attempts.flat().length, 0)
+  assert.ok((await app.api<Run>(`/runs/${saved.id}/archive`, 'POST', {})).archivedAt)
+  await app.api(`/runs/${active.id}/stop`, 'POST', {})
+  await waitForRun(app.api, active.id, 'stopped')
+  assert.ok((await app.api<Run>(`/runs/${active.id}/archive`, 'POST', {})).archivedAt)
+
+  const run = await app.api<Run>('/runs', 'POST', { ...defaults, requestId: randomUUID(), goal: '完成后归档' })
+  const done = await waitForRun(app.api, run.id, 'succeeded')
+  const archived = await app.api<ArchivedRun>(`/runs/${run.id}/archive`, 'POST', {})
   assert.ok(archived.archivedAt)
-  assert.equal(archived.status, 'running')
-  assert.equal((await app.api<Run>(`/runs/${run.id}/archive`, 'POST', {})).archivedAt, archived.archivedAt)
-  await app.api(`/runs/${run.id}/stop`, 'POST', {})
-  const stopped = await waitForRun(app.api, run.id, 'stopped')
-  assert.equal(stopped.archivedAt, archived.archivedAt)
+  assert.equal(archived.status, 'succeeded')
+  const locked = await app.api<ArchivedRun>(`/runs/${run.id}`)
+  assert.deepEqual(locked, archived)
+  assert.deepEqual(locked.project, { name: project.name })
+  assert.deepEqual(locked.iteration, { name: iteration.name })
+  for (const key of ['goal', 'details', 'attempts', 'stages', 'resources', 'accounts', 'pending']) {
+    assert.equal(Object.hasOwn(locked, key), false, key)
+  }
+  assert.deepEqual(await app.api('/runs', 'POST', { ...defaults, requestId: run.id, goal: '重复提交' }), locked)
+  for (const action of ['archive', 'start', 'retry', 'stop', 'followup', 'approval', 'advance', 'interactions/fixture']) {
+    await assert.rejects(() => app.api(`/runs/${run.id}/${action}`, 'POST', {}), /请先恢复归档任务/)
+  }
+  await assert.rejects(() => app.api(`/runs/${run.id}/context`), /请先恢复归档任务/)
+  await assert.rejects(() => app.api(`/runs/${run.id}/events`), /请先恢复归档任务/)
+  await assert.rejects(() => app.api(`/runs/${run.id}/prompt`, 'PUT', { text: '尝试编辑归档提示词' }), /请先恢复归档任务/)
+  await assert.rejects(() => app.api(`/runs/${run.id}/optimize-prompt`, 'POST', { text: '尝试优化归档提示词' }), /请先恢复归档任务/)
+  await assert.rejects(() => app.api(`/runs/${run.id}`, 'PUT', { ...defaults, requestId: run.id, goal: '尝试编辑归档任务' }), /请先恢复归档任务/)
+  await assert.rejects(() => app.api('/runs', 'POST', {
+    ...defaults, requestId: randomUUID(), goal: '尝试继续归档任务', continuation: { parentId: run.id },
+  }), /请先恢复归档任务/)
   await app.stop()
+  const database = new DatabaseSync(join(h.dir, 'data', 'workbench.sqlite'))
+  try {
+    database.exec("DELETE FROM settings WHERE key = 'run-started-v1'")
+    database.prepare("UPDATE runs SET json = json_remove(json, '$.started') WHERE id IN (?, ?)").run(saved.id, neverStarted.id)
+  } finally { database.close() }
   app = await serve(h.dir)
   const summary = (await app.api<RunSummary[]>('/runs')).find(item => item.id === run.id)
   assert.equal(summary?.archivedAt, archived.archivedAt)
   assert.equal(summary?.projectId, project.id)
   assert.equal(summary?.iterationId, iteration.id)
+  assert.equal((await app.api<ArchivedRun>(`/runs/${saved.id}`)).started, true)
+  assert.equal((await app.api<Run>(`/runs/${neverStarted.id}`)).started, false)
   const restored = await app.api<Run>(`/runs/${run.id}/unarchive`, 'POST', {})
   assert.equal(restored.archivedAt, undefined)
-  assert.equal(restored.status, 'stopped')
-  assert.deepEqual(restored.attempts, stopped.attempts)
+  assert.equal(restored.status, 'succeeded')
+  assert.deepEqual(restored.attempts, done.attempts)
+  await assert.rejects(() => app.api(`/runs/${run.id}/prompt`, 'PUT', { revision: restored.revision, text: '恢复后编辑' }), /已保存且未开始/)
 })
 
 test('继续修改可复用原生会话和资料差异，也可用交接摘要开启新会话', async t => {
@@ -221,7 +278,7 @@ test('项目是必选项，直接任务可补充类型和细节并自行探索�
   const payload = { requestId: randomUUID(), goal: '梳理活动页需求\n输出可验收的清单', taskType: 'requirements',
     details: { references: '对照错误码和提示文案', constraints: '保持现有接口契约', output: '列出异常状态' } }
   await assert.rejects(() => api('/runs', 'POST', payload), /400/)
-  const run = await api<Run>('/runs', 'POST', { ...payload, projectId: project.id, iterationId: iteration.id })
+  const run = await api<Run>('/runs', 'POST', { ...payload, projectId: project.id, iterationId: iteration.id, engineId: engine.id })
   assert.equal(run.title, '梳理活动页需求')
   assert.equal(run.templateName, '')
   assert.equal(run.stages[0].engine?.id, engine.id)
@@ -293,7 +350,7 @@ test('绑定资料按需读取本机保存的账号密码，并在重启后继�
   const resourceForm = { projectId: project.id, iterationId: iteration.id, kind: 'url', name: '账号保护的说明', category: '接口',
     value: `${origin}/spec`, prompt: '', fetch: false, accountId: account.id }
   const resource = await app.api<Resource>('/config/resources', 'POST', resourceForm)
-  const dispatch = () => app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, iterationId: iteration.id, goal: '读取接口说明' })
+  const dispatch = (start = true) => app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, iterationId: iteration.id, goal: '读取接口说明', start })
   const reference = await dispatch()
   await waitForRun(app.api, reference.id, 'succeeded')
   assert.equal(reads, 0)
@@ -313,7 +370,12 @@ test('绑定资料按需读取本机保存的账号密码，并在重启后继�
   app = await serve(h.dir)
   assert.equal((await app.api<Preferences>('/preferences')).dataDirectory, target)
   await app.api(`/config/resources/${resource.id}`, 'PUT', { ...resourceForm, fetch: true })
-  const fetched = await dispatch()
+  const fetched = await dispatch(false)
+  const preview = await app.api<AgentPromptPreview>(`/runs/${fetched.id}/prompt`)
+  assert.ok(preview.text.includes(`/context/${encodeURIComponent(`resource:${resource.id}`)}?stage=0`))
+  assert.doesNotMatch(preview.text, /认证后的迭代资料/)
+  assert.equal(reads, 0)
+  await app.api(`/runs/${fetched.id}/start`, 'POST', {})
   await waitForRun(app.api, fetched.id, 'succeeded')
   assert.equal(reads, 1)
   const stream = await fetch(`${app.baseUrl}/api/runs/${fetched.id}/events`)
@@ -332,4 +394,133 @@ test('绑定资料按需读取本机保存的账号密码，并在重启后继�
   assert.match(input, /\[REDACTED\]/)
   assert.equal(input.includes(password) || input.includes(JSON.stringify(password).slice(1, -1)) || input.includes(basic), false)
   assert.equal(Object.hasOwn(fetched.accounts[0], 'password'), false)
+})
+
+test('本地文件夹要素按项目相对路径交给 Agent', async t => {
+  const h = await harness()
+  const app = await serve(h.dir)
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const { api } = app
+  const engine = await api<Engine>('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
+  const project = await api<Project>('/config/projects', 'POST', { name: '文件夹项目', directory: h.project })
+  await mkdir(join(h.project, '素材'))
+  await writeFile(join(h.project, '素材', '按钮规范.md'), '按钮规范')
+  const resource = await api<Resource>('/config/resources', 'POST', { projectId: project.id, name: '素材目录', category: '设计', kind: 'file',
+    value: join(h.project, '素材'), prompt: '参考素材目录', fetch: false, accountId: '' })
+  assert.equal(resource.value, '素材')
+  const run = await api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '读取素材目录' })
+  await waitForRun(api, run.id, 'succeeded')
+  const stream = await fetch(`${app.baseUrl}/api/runs/${run.id}/events`)
+  const reader = stream.body!.getReader()
+  const decoder = new TextDecoder()
+  let payload = ''
+  while (!payload.includes('"status":"succeeded"')) {
+    const next = await reader.read()
+    if (next.done) break
+    payload += decoder.decode(next.value, { stream: true })
+  }
+  await reader.cancel()
+  const input = payload.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)))
+    .find(event => event.kind === 'input')?.data.text as string
+  assert.match(input, /项目文件夹相对路径，请读取该目录中的文件/)
+  assert.match(input, /素材/)
+})
+
+test('任务可以只保存不执行，并可在重启后开始', async t => {
+  const h = await harness()
+  let app = await serve(h.dir)
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const engine = await app.api<Engine>('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
+  const project = await app.api<Project>('/config/projects', 'POST', { name: '保存任务项目', directory: h.project })
+  const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '保存后稍后执行', start: false })
+  assert.equal(run.status, 'saved')
+  assert.equal(run.attempts.flat().length, 0)
+  assert.equal((await app.api<RunSummary[]>('/runs')).find(item => item.id === run.id)?.status, 'saved')
+  const form = { requestId: run.id, projectId: project.id, engineId: engine.id, goal: '保存后修改的目标', start: false, details: { output: '校验空数据' } }
+  const edited = await app.api<Run>(`/runs/${run.id}`, 'PUT', form)
+  assert.equal(edited.goal, '保存后修改的目标')
+  assert.equal(edited.title, '保存后修改的目标')
+  assert.equal(edited.status, 'saved')
+  assert.equal(edited.details?.output, '校验空数据')
+  assert.deepEqual(edited.attempts, run.attempts)
+  await assert.rejects(() => app.api(`/runs/${run.id}/context`, 'PUT', { goal: '这份修改不应保存' }), /-> 404/)
+  await assert.rejects(() => app.api(`/runs/${run.id}/optimize-context`, 'POST', { goal: '上下文优化入口已移除' }), /-> 404/)
+  const path = `/runs/${run.id}/prompt`
+  const automatic = await app.api<AgentPromptPreview>(path)
+  assert.equal(automatic.edited, false)
+  assert.match(automatic.text, /校验空数据/)
+  const text = '自定义 Agent 提示词\n逐条校验空数据返回'
+  const customized = await app.api<Run>(path, 'PUT', { text, revision: edited.revision })
+  await assert.rejects(() => app.api(path, 'PUT', { text: '过期的编辑', revision: edited.revision }), /任务已变更/)
+  assert.deepEqual(await app.api<AgentPromptPreview>(path), { text, edited: true })
+  assert.equal((await app.api<Run>(path, 'PUT', { text: null, revision: customized.revision })).stages[0].promptOverride, undefined)
+  assert.deepEqual(await app.api<AgentPromptPreview>(path), automatic)
+  await app.api(path, 'PUT', { text })
+  await app.stop()
+  app = await serve(h.dir)
+  assert.equal((await app.api<Run>(`/runs/${run.id}`)).goal, '保存后修改的目标')
+  assert.deepEqual(await app.api<AgentPromptPreview>(path), { text, edited: true })
+  await app.api(`/runs/${run.id}/start`, 'POST', {})
+  const done = await waitForRun(app.api, run.id, 'succeeded')
+  assert.match(done.goal ?? '', /保存后修改的目标/)
+  assert.equal(done.details?.output, '校验空数据')
+  assert.equal(typeof done.durationMs, 'number')
+  assert.ok((done.durationMs ?? 0) >= 0)
+  assert.equal(typeof (await app.api<RunSummary[]>('/runs')).find(item => item.id === run.id)?.durationMs, 'number')
+  await assert.rejects(() => app.api(`/runs/${run.id}`, 'PUT', { ...form, goal: '完成后修改的记录' }), /已保存且未开始/)
+  await assert.rejects(() => app.api(path, 'PUT', { text: '完成后修改提示词' }), /已保存且未开始/)
+  await assert.rejects(() => app.api(`/runs/${run.id}/optimize-prompt`, 'POST', { text }), /已保存且未开始/)
+  const stream = await fetch(`${app.baseUrl}/api/runs/${run.id}/events`, { signal: AbortSignal.timeout(5000) })
+  const reader = stream.body!.getReader()
+  const decoder = new TextDecoder()
+  let received = ''
+  try {
+    while (!received.includes('"status":"succeeded"')) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      received += decoder.decode(chunk.value, { stream: true })
+    }
+  } finally { await reader.cancel() }
+  const input = received.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))).find(event => event.kind === 'input')
+  assert.equal(input?.data.text, text)
+})
+
+test('中断的任务可以继续修改', async t => {  const h = await harness()
+  let app = await serve(h.dir)
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const engine = await app.api<Engine>('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
+  const project = await app.api<Project>('/config/projects', 'POST', { name: '中断继续项目', directory: h.project })
+  const run = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: 'HOLD_FOR_CANCEL' })
+  await waitForRun(app.api, run.id, 'running')
+  await app.stop()
+  app = await serve(h.dir)
+  assert.equal((await app.api<Run>(`/runs/${run.id}`)).status, 'interrupted')
+  const next = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '继续完成中断前的改动',
+    continuation: { parentId: run.id, mode: 'handoff' } })
+  assert.equal(next.continuation?.parentId, run.id)
+  await waitForRun(app.api, next.id, 'running')
+  await app.api(`/runs/${next.id}/stop`, 'POST', {})
+  await waitForRun(app.api, next.id, 'stopped')
+})
+
+test('归档主任务时连同续改任务一起归档，恢复同样联动', async t => {
+  const h = await harness()
+  const app = await serve(h.dir)
+  t.after(async () => { await app.stop(); await h.cleanup() })
+  const engine = await app.api<Engine>('/config/engines/cursor-default', 'PUT', { name: 'Cursor', provider: 'cursor', executable: h.wrappers.cursor, model: '', mode: 'agent' })
+  const project = await app.api<Project>('/config/projects', 'POST', { name: '归档联动项目', directory: h.project })
+  const first = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '第一段工作' })
+  await waitForRun(app.api, first.id, 'succeeded')
+  const second = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '第二段工作',
+    continuation: { parentId: first.id, mode: 'handoff' } })
+  await waitForRun(app.api, second.id, 'succeeded')
+  const third = await app.api<Run>('/runs', 'POST', { requestId: randomUUID(), projectId: project.id, engineId: engine.id, goal: '第三段工作',
+    continuation: { parentId: second.id, mode: 'handoff' } })
+  await waitForRun(app.api, third.id, 'succeeded')
+
+  await assert.rejects(app.api(`/runs/${second.id}/archive`, 'POST', {}), /主会话/)
+  await app.api(`/runs/${first.id}/archive`, 'POST', {})
+  for (const id of [first.id, second.id, third.id]) assert.ok((await app.api<Run>(`/runs/${id}`)).archivedAt, id)
+  await app.api(`/runs/${first.id}/unarchive`, 'POST', {})
+  for (const id of [first.id, second.id, third.id]) assert.equal((await app.api<Run>(`/runs/${id}`)).archivedAt, undefined, id)
 })

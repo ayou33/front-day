@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isApiExecutor } from '../shared/contracts.ts'
 import type { Attempt, Run, StageSnapshot } from '../shared/contracts.ts'
 import type { ContextStamp, Handoff } from '../shared/continuations.ts'
 import { legacyIterationElements, projectFields } from '../shared/context.ts'
@@ -40,7 +41,7 @@ export function compatibleSession(parent: Run, directory: string, stage?: StageS
   const engine = stage?.engine
   if (parent.project.directory !== directory || !source || !engine || stage.kind !== 'agent') return undefined
   const previous = source.engine
-  if (engine.id !== previous.id || engine.provider !== previous.provider || engine.executable !== previous.executable
+  if (isApiExecutor(engine) || isApiExecutor(previous) || engine.id !== previous.id || engine.provider !== previous.provider || engine.executable !== previous.executable
     || engine.model !== previous.model || engine.mode !== previous.mode) return undefined
   return source
 }

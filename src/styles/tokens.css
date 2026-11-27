@@ -74,6 +74,12 @@
   --info: #2a6279;
   --info-soft: #e2eff5;
   --info-line: #c3dce8;
+  --plan-active: #c2681a;
+  --plan-active-ink: #ffffff;
+  --plan-done: #357a5f;
+  --plan-done-ink: #ffffff;
+  --plan-overdue: #a33a30;
+  --plan-overdue-ink: #ffffff;
   --violet: #5b4186;
   --violet-soft: #efe9f9;
   --violet-line: #dcCFee;
@@ -165,6 +171,12 @@
     --info: #8fc4d9;
     --info-soft: rgba(143, 196, 217, .13);
     --info-line: rgba(143, 196, 217, .22);
+    --plan-active: #b5611c;
+    --plan-active-ink: #ffffff;
+    --plan-done: #2f6f57;
+    --plan-done-ink: #f3fbf6;
+    --plan-overdue: #b84f45;
+    --plan-overdue-ink: #fff5f3;
     --violet: #c3a7ea;
     --violet-soft: rgba(195, 167, 234, .13);
     --violet-line: rgba(195, 167, 234, .24);

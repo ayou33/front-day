@@ -2,22 +2,24 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Check as CheckIcon, CheckCircle2, FolderOpen, Monitor, Moon, Sun } from 'lucide-react'
 import { taskTypeDefinition } from '../shared/context.ts'
-import type { Engine, EngineAvailability } from '../shared/contracts.ts'
+import type { Catalog } from '../shared/contracts.ts'
 import { defaultPreferences, themeOptions } from '../shared/preferences.ts'
 import type { Preferences } from '../shared/preferences.ts'
+import { defaultPromptOptimizer } from '../shared/prompt-optimizer.ts'
+import type { PromptOptimizerSettings } from '../shared/prompt-optimizer.ts'
 import { request } from './api.ts'
 import { DirectoryPicker } from './DirectoryPicker.tsx'
 import { applyTheme, watchSystemTheme } from './theme.ts'
-import { Check, EngineOptions, ErrorLine, Field, message, SectionHeading, TaskTypeOptions } from './ui.tsx'
+import { Check, ErrorLine, ExecutorOptions, Field, hasExecutor, message, SectionHeading, TaskTypeOptions } from './ui.tsx'
 
 const themeIcons = { auto: Monitor, light: Sun, dark: Moon }
 
-export function PreferencesView({ preferences, engines, availability, onSave }: {
-  preferences: Preferences; engines: Engine[]; availability?: EngineAvailability[]; onSave: (preferences: Preferences) => void
+export function PreferencesView({ preferences, catalog, refresh, onSave }: {
+  preferences: Preferences; catalog: Catalog; refresh: () => Promise<void>; onSave: (preferences: Preferences) => void
 }) {
   const [draft, setDraft] = useState<Preferences>(() => ({
     ...preferences, theme: preferences.theme ?? 'auto',
-    defaultEngineId: engines.some(engine => engine.id === preferences.defaultEngineId) ? preferences.defaultEngineId : '',
+    defaultEngineId: hasExecutor(catalog, preferences.defaultEngineId) ? preferences.defaultEngineId : '',
   }))
   const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -90,8 +92,8 @@ export function PreferencesView({ preferences, engines, availability, onSave }: 
       <section className="panel"><div className="panel-header"><h2>默认偏好</h2></div>
         <div className="preference-fields">
           <div className="form-columns">
-            <Field label="默认引擎"><select value={draft.defaultEngineId} disabled={busy} onChange={event => edit({ defaultEngineId: event.target.value })}>
-              <option value="">自动选择本机可用引擎</option><EngineOptions engines={engines} availability={availability} />
+            <Field label="默认执行器"><select value={draft.defaultEngineId} disabled={busy} onChange={event => edit({ defaultEngineId: event.target.value })}>
+              <option value="">自动选择本机可用引擎</option><ExecutorOptions catalog={catalog} />
             </select></Field>
             <Field label="默认任务类型" detail={taskTypeDefinition(draft.defaultTaskType)?.hint}><select value={draft.defaultTaskType} disabled={busy} onChange={event => edit({ defaultTaskType: event.target.value as Preferences['defaultTaskType'] })}>
               <option value="">由 Agent 根据目标判断</option><TaskTypeOptions />
@@ -109,6 +111,46 @@ export function PreferencesView({ preferences, engines, availability, onSave }: 
         <button className="button primary" disabled={busy}>{busy ? changingDirectory ? '正在复制数据…' : '正在保存…' : '保存配置'}</button>
       </div>
     </form>
+    <OptimizerPreferences key={preferences.dataDirectory} catalog={catalog} refresh={refresh} disabled={busy} />
     {picking && <DirectoryPicker title="选择数据目录" initial={draft.dataDirectory} close={() => setPicking(false)} select={dataDirectory => { edit({ dataDirectory }); setPicking(false) }} />}
   </>
+}
+
+function OptimizerPreferences({ catalog, refresh, disabled }: { catalog: Catalog; refresh: () => Promise<void>; disabled: boolean }) {
+  const [draft, setDraft] = useState(catalog.promptOptimizer ?? defaultPromptOptimizer)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState(false)
+  const executorId = hasExecutor(catalog, draft.executorId, 'optimization') ? draft.executorId : ''
+  async function save(event: FormEvent) {
+    event.preventDefault()
+    if (busy || disabled) return
+    setBusy(true)
+    setError('')
+    setSaved(false)
+    try {
+      setDraft(await request<PromptOptimizerSettings>('/prompt-optimizer', 'PUT', { enabled: draft.enabled, executorId }))
+      await refresh()
+      setSaved(true)
+    } catch (error) { setError(message(error)) }
+    finally { setBusy(false) }
+  }
+  return <form className="panel optimizer-preferences" onSubmit={save} onChange={() => setSaved(false)}>
+    <div className="panel-header"><div><h2>提示词优化</h2><p>为新任务目标和 Agent 提示词选择生成优化建议的执行器。</p></div></div>
+    <div className="preference-fields">
+      <fieldset disabled={disabled || busy} className="optimizer-fields">
+        <Check checked={draft.enabled} onChange={enabled => setDraft({ ...draft, enabled })}>启用提示词优化</Check>
+        {draft.enabled && <Field label="优化执行器" detail="执行器的模型和密钥在「引擎与 API」中管理。">
+          <select required value={executorId} onChange={event => setDraft({ ...draft, executorId: event.target.value })}>
+            <option value="">选择执行器</option><ExecutorOptions catalog={catalog} purpose="optimization" />
+          </select>
+        </Field>}
+      </fieldset>
+      <ErrorLine text={error} />
+      <div className="preference-actions">
+        {saved && <span className="preference-saved" role="status"><CheckCircle2 size={16} />提示词优化已保存</span>}
+        <button className="button primary" disabled={disabled || busy || (draft.enabled && !executorId)}>{busy ? '正在保存…' : '保存提示词配置'}</button>
+      </div>
+    </div>
+  </form>
 }
