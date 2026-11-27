@@ -165,12 +165,13 @@ export function PlansView({ onChange }: { onChange?: () => void }) {
     if (!target || actingId) return
     setMenu(null)
     if (action === 'start') {
-      const reason = planStartBlockedReason(target, today)
+      const reason = planStartBlockedReason(target)
       if (reason) { setError(reason); return }
       setActingId(target.id)
       setError('')
       try {
-        storeItem(await saveConfig('plan-items', { ...target, status: 'in-progress', startDate: today }))
+        const endDate = target.endDate < today ? today : target.endDate
+        storeItem(await saveConfig('plan-items', { ...target, status: 'in-progress', startDate: today, endDate }))
         if (today.slice(0, 7) !== month) setMonth(today.slice(0, 7))
         onChange?.()
       } catch (error) { setError(`开始计划失败。${message(error)}`) }

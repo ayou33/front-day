@@ -17,15 +17,15 @@ export function pastPlanDateError(dates: PlanDates, today: string, previous?: Pl
   return ''
 }
 
+/** 只有进行中的计划在结束日期过去后才算逾期；未开始计划不进入逾期状态。 */
 export function isPlanOverdue(item: { status: PlanStatus; endDate: string }, today: string) {
-  return item.status !== 'done' && item.endDate < today
+  return item.status === 'in-progress' && item.endDate < today
 }
 
-/** 开始按钮的互斥规则：已开始、已完成或已逾期都不能再次开始。 */
-export function planStartBlockedReason(item: { status: PlanStatus; endDate: string }, today: string) {
+/** 开始按钮的互斥规则：已开始或已完成不能再开始。 */
+export function planStartBlockedReason(item: { status: PlanStatus }) {
   if (item.status === 'done') return '计划已完成'
   if (item.status === 'in-progress') return '计划已开始'
-  if (item.endDate < today) return '已逾期，不能开始'
   return ''
 }
 

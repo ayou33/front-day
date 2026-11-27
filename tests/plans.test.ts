@@ -110,16 +110,15 @@ test('同日计划项可调整顺序并在重启后保留', async t => {
   assert.deepEqual((await app.api<PlanItem[]>(path)).map(item => [item.name, item.order]).sort(), [['第一项', 1], ['第二项', 0]])
 })
 
-test('计划开始与完成遵守状态互斥，逾期不能开始', () => {
+test('计划开始与完成遵守状态互斥，只有进行中会标记逾期', () => {
   const today = '2026-11-27'
   const planned = { startDate: today, endDate: today, status: 'planned' as const }
   assert.equal(isPlanOverdue({ ...planned, status: 'in-progress', endDate: '2026-11-26' }, today), true)
+  assert.equal(isPlanOverdue({ ...planned, endDate: '2026-11-26' }, today), false)
   assert.equal(isPlanOverdue({ ...planned, status: 'done', endDate: '2026-11-26' }, today), false)
-  assert.equal(planStartBlockedReason(planned, today), '')
-  assert.equal(planStartBlockedReason({ ...planned, endDate: '2026-11-30' }, today), '')
-  assert.equal(planStartBlockedReason({ ...planned, endDate: '2026-11-26' }, today), '已逾期，不能开始')
-  assert.equal(planStartBlockedReason({ ...planned, status: 'in-progress' }, today), '计划已开始')
-  assert.equal(planStartBlockedReason({ ...planned, status: 'done' }, today), '计划已完成')
+  assert.equal(planStartBlockedReason(planned), '')
+  assert.equal(planStartBlockedReason({ ...planned, status: 'in-progress' }), '计划已开始')
+  assert.equal(planStartBlockedReason({ ...planned, status: 'done' }), '计划已完成')
   assert.equal(planCompleteBlockedReason(planned), '计划未开始')
   assert.equal(planCompleteBlockedReason({ ...planned, status: 'in-progress' }), '')
   assert.equal(planCompleteBlockedReason({ ...planned, status: 'done' }), '计划已完成')

@@ -15,7 +15,7 @@ export function PlanContextMenu({ item, point, today, onAction, onClose }: {
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const overdue = isPlanOverdue(item, today)
-  const startReason = planStartBlockedReason(item, today)
+  const startReason = planStartBlockedReason(item)
   const completeReason = planCompleteBlockedReason(item)
 
   useLayoutEffect(() => {
